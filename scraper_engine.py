@@ -1,1383 +1,1881 @@
 """
-============================================================
-POLITICAL MEDIA INTELLIGENCE SYSTEM v2.0
-Bangladesh + India + International Media Monitor
-============================================================
-Deployed on: Hugging Face Spaces (Streamlit SDK)
-Engine: scraper_engine.py (Tier1/2/3/GNews)
-============================================================
+╔══════════════════════════════════════════════════════════════╗
+║   SCRAPER ENGINE v4.0 — ULTRA ADVANCED                       ║
+║   Political Media Intelligence System                        ║
+║   Full Article Scraping: Title + Body + Meta                 ║
+╠══════════════════════════════════════════════════════════════╣
+║  TIER 1  ⚡  aiohttp + BeautifulSoup   (lightweight/fast)    ║
+║  TIER 2  🎭  Playwright async          (JS-rendered)         ║
+║  TIER 3  🥷  Playwright stealth        (anti-bot bypass)     ║
+║  TIER 4  📡  Google News RSS           (reliable fallback)   ║
+║  TIER 5  📰  Direct RSS/Atom feed      (last resort)         ║
+╠══════════════════════════════════════════════════════════════╣
+║  94+ outlets | BD TV · BD Newspapers · India · Intl · Asia  ║
+║  Each article: title + full_text + summary + url + time     ║
+╚══════════════════════════════════════════════════════════════╝
 """
 
-import os
-import sys
-import subprocess
-import streamlit as st
+from __future__ import annotations
 
-# ── HF Spaces: install Playwright browser on cold start ──
-@st.cache_resource(show_spinner=False)
-def _install_playwright():
-    try:
-        result = subprocess.run(
-            ["playwright", "install", "chromium", "--with-deps"],
-            capture_output=True, text=True, timeout=180
-        )
-        return result.returncode == 0
-    except Exception:
-        try:
-            os.system("playwright install chromium --with-deps")
-        except Exception:
-            pass
-        return False
-
-_pw_ok = _install_playwright()
-
-# ── Page config (MUST be first Streamlit call) ───────────
-st.set_page_config(
-    page_title="🧠 Political Media Intelligence",
-    page_icon="🧠",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
-import requests
-import json
+import asyncio
+import hashlib
 import re
 import time
+import random
+import logging
+import json
 from datetime import datetime
-from collections import Counter, defaultdict
+from typing import Optional
+from urllib.parse import urlparse, urljoin, quote_plus
 
+# ── Optional dependency guards ────────────────────────────
 try:
-    from textblob import TextBlob
-    HAS_TEXTBLOB = True
+    import aiohttp
+    HAS_AIOHTTP = True
 except ImportError:
-    HAS_TEXTBLOB = False
+    HAS_AIOHTTP = False
 
 try:
-    from scraper_engine import run_scraper, SITE_SELECTORS
-except ImportError as e:
-    st.error(f"❌ scraper_engine.py ইমপোর্ট করা যায়নি: {e}")
-    st.stop()
+    from bs4 import BeautifulSoup
+    HAS_BS4 = True
+except ImportError:
+    HAS_BS4 = False
+
+try:
+    import feedparser
+    HAS_FEEDPARSER = True
+except ImportError:
+    HAS_FEEDPARSER = False
+
+try:
+    from playwright.async_api import async_playwright
+    HAS_PLAYWRIGHT = True
+except ImportError:
+    HAS_PLAYWRIGHT = False
+
+logger = logging.getLogger("scraper_engine")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
 
 
 # ============================================================
-# MEDIA DIRECTORY
+# ARTICLE DATA STRUCTURE
 # ============================================================
 
-MEDIA_DIRECTORY = {
-    "print_newspapers_bangla": [
-        {"name": "Daily Janakantha",   "website": "dailyjanakantha.com",  "key_person": "Enayetur Rahim"},
-        {"name": "Jai Jai Din",        "website": "jjdin.com",            "key_person": "Sayeed Hossain Chowdhury"},
-        {"name": "Bhorer Kagoj",       "website": "bhorerkagoj.com",      "key_person": "Shyamal Dutta"},
-        {"name": "Daily Inqilab",      "website": "dailyinqilab.com",     "key_person": "A.M.M. Bahauddin"},
-        {"name": "Sangbad",            "website": "sangbad.net.bd",       "key_person": "Altamash Kabir"},
-        {"name": "Daily Dinkal",       "website": "daily-dinkal.com",     "key_person": "Dr. Rezuan Hossain"},
-        {"name": "Kalbela",            "website": "kalbela.com",          "key_person": "Mia Nuruddin Apu"},
-        {"name": "Desh Rupantor",      "website": "deshrupantor.com",     "key_person": "Mustafa Mamun"},
-    ],
-    "print_newspapers_english": [
-        {"name": "Daily Star",         "website": "thedailystar.net",     "key_person": "Mahfuz Anam"},
-        {"name": "Daily Observer",     "website": "observerbd.com",       "key_person": "Iqbal Sobhan Chowdhury"},
-        {"name": "Business Standard",  "website": "tbsnews.net",          "key_person": "Inam Ahmed"},
-        {"name": "Dhaka Tribune",      "website": "dhakatribune.com",     "key_person": "Zafar Sobhan"},
-    ],
-    "digital_news_portals": [
-        {"name": "BD News 24",         "website": "bangla.bdnews24.com",  "key_person": "Toufique Imrose Khalidi"},
-        {"name": "Jago News 24",       "website": "jagonews24.com",       "key_person": "Mohiuddin Sarker"},
-        {"name": "Bangla Tribune",     "website": "banglatribune.com",    "key_person": "Zulfiqer Russell"},
-        {"name": "Amar Desh",          "website": "amar-desh24.com",      "key_person": "Mahmudur Rahman"},
-    ],
-    "television_channels": [
-        {"name": "Somoy News",         "website": "somoynews.tv",         "key_person": "Ahmed Jobaer"},
-        {"name": "Jamuna TV",          "website": "jamuna.tv",            "key_person": "Fahim Ahmed"},
-        {"name": "Channel i",          "website": "channelionline.com",   "key_person": "Shykh Seraj"},
-        {"name": "Ekattor TV",         "website": "ekattor.tv",           "key_person": "Mozammel Babu"},
-    ],
-    "regional_portals": [
-        {"name": "Coxsbazar News",     "website": "coxsbazarnews.com",    "key_person": "Prof. Akthar Chowdhury"},
-        {"name": "Daily Coxsbazar",    "website": "dailycoxsbazar.com",   "key_person": "Mohammad Mujibur Rahman"},
-        {"name": "Uttorpurbo",         "website": "uttorpurbo.com",       "key_person": "Safwan Chowdhury"},
-        {"name": "Ajker Jamalpur",     "website": "ajkerjamalpur.com",    "key_person": "Azizur Rahman"},
-        {"name": "Amader Barisal",     "website": "amaderbarisal.com",    "key_person": "Saidur Rahman"},
-        {"name": "Surma Times",        "website": "surmatimes.com",       "key_person": "Editorial Team"},
-        {"name": "Chandpur Times",     "website": "chandpurtimes.com",    "key_person": "Kazi Md. Ibrahim Juel"},
-        {"name": "Mukto Khobor 24",    "website": "muktokhobor24.com",    "key_person": "M.A. Malek"},
-        {"name": "Bogra Sangbad",      "website": "bograsangbad.com",     "key_person": "Kamal Ahmed"},
-        {"name": "Rajshahir Somoy",    "website": "rajshahirsomoy.com",   "key_person": "Humayun Kabir"},
-        {"name": "Lakshmipur 24",      "website": "lakshmipur24.com",     "key_person": "Sana Ullah Sanu"},
-        {"name": "Prothom Feni",       "website": "prothom-feni.com",     "key_person": "Ariful Amin Majumder"},
-        {"name": "Gramer Kagoj",       "website": "gamerkagoj.com",       "key_person": "Mobinul Islam Mobin"},
-    ],
-    "indian_bengali_media": [
-        {"name": "Anandabazar Patrika","website": "anandabazar.com",       "key_person": "Aveek Sarkar"},
-        {"name": "Sangbad Pratidin",   "website": "sangbadpratidin.in",   "key_person": "Srinjoy Bose"},
-        {"name": "ABP Ananda",         "website": "bengali.abplive.com",  "key_person": "Suman De"},
-        {"name": "24 Ghanta",          "website": "zee24ghanta.com",      "key_person": "Anirban Chowdhury"},
-        {"name": "Ei Samay",           "website": "eisamay.com",          "key_person": "Rupankar Sarkar"},
-        {"name": "Bartaman Patrika",   "website": "bartamanpatrika.com",  "key_person": "Subha Dutta"},
-    ],
-    "international_news_agencies": [
-        {"name": "BBC News",           "website": "bbc.com",              "key_person": "Tim Davie"},
-        {"name": "Al Jazeera",         "website": "aljazeera.com",        "key_person": "Mostefa Souag"},
-        {"name": "AFP",                "website": "afp.com",              "key_person": "Fabrice Fries"},
-        {"name": "The Guardian",       "website": "theguardian.com",      "key_person": "Katharine Viner"},
-        {"name": "CNN",                "website": "edition.cnn.com",      "key_person": "Mark Thompson"},
-        {"name": "NY Times",           "website": "nytimes.com",          "key_person": "A.G. Sulzberger"},
-        {"name": "Hindustan Times",    "website": "hindustantimes.com",   "key_person": "Shobhana Bhartia"},
-        {"name": "ABC News",           "website": "abcnews.go.com",       "key_person": "David Muir"},
-        {"name": "Yahoo News",         "website": "news.yahoo.com",       "key_person": "Editorial Team"},
-    ],
+def _empty_article(url: str = "", title: str = "") -> dict:
+    """Return a blank article skeleton."""
+    return {
+        "title":        title,
+        "url":          url,
+        "summary":      "",
+        "full_text":    "",
+        "published_at": "",
+        "author":       "",
+        "image_url":    "",
+        "tags":         [],
+        "word_count":   0,
+        "scraped_at":   datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+# ============================================================
+# SITE SELECTORS — Title · Article links · Content · Meta
+# ============================================================
+# headline_sel   : CSS selectors for article titles on homepage
+# link_sel       : CSS selectors to extract article URLs
+# content_sel    : CSS selectors for full article body
+# summary_sel    : CSS selectors for article summary/lead
+# author_sel     : CSS selectors for author name
+# date_sel       : CSS selectors for publish date
+# image_sel      : CSS selectors for lead image
+# rss            : Direct RSS/Atom feed URL
+# tier           : Preferred scrape tier (1/2/3)
+# article_tier   : Tier for individual article scraping
+
+SITE_SELECTORS: dict[str, dict] = {
+
+    # ══════════════════════════════════════════════════════
+    # BANGLADESH TV CHANNELS
+    # ══════════════════════════════════════════════════════
+
+    "somoynews.tv": {
+        "headline_sel": ["h3.title a", "h2.title a", ".news-title a", ".card-title a", "h3 a"],
+        "link_sel":     ["h3.title a", "h2.title a", ".news-title a", ".card-title a", "h3 a"],
+        "content_sel":  [".details-body p", ".news-details p", ".article-content p", ".entry-content p", "article p"],
+        "summary_sel":  [".details-lead", ".news-lead", ".article-summary", ".excerpt", "p.intro"],
+        "author_sel":   [".reporter-name", ".author-name", ".byline", ".writer"],
+        "date_sel":     [".news-time", ".publish-time", "time", ".date", ".post-date"],
+        "image_sel":    [".details-img img", ".news-img img", "article img", ".featured-img img"],
+        "rss":          "https://www.somoynews.tv/rss.xml",
+        "tier":         2,
+        "article_tier": 2,
+    },
+    "jamuna.tv": {
+        "headline_sel": [".news-title a", "h3.title a", "h2 a", ".latest-news a", ".card-title a"],
+        "link_sel":     [".news-title a", "h3.title a", ".card-title a", "h2 a"],
+        "content_sel":  [".details-body p", ".news-body p", ".content-details p", "article p", ".entry-content p"],
+        "summary_sel":  [".news-lead", ".article-excerpt", ".summary", "p.lead"],
+        "author_sel":   [".reporter", ".author", ".byline", ".written-by"],
+        "date_sel":     ["time", ".publish-date", ".news-time", ".date-time"],
+        "image_sel":    [".news-details img", "article img", ".thumb img"],
+        "rss":          "https://www.jamuna.tv/feed",
+        "tier":         2,
+        "article_tier": 2,
+    },
+    "channel24bd.tv": {
+        "headline_sel": ["h3 a", ".news-card-title a", ".top-news-title a", "h2 a", ".headline a"],
+        "link_sel":     ["h3 a", ".news-card-title a", ".top-news-title a", "h2 a"],
+        "content_sel":  [".details-content p", ".news-content p", ".article-body p", "article p"],
+        "summary_sel":  [".lead-para", ".article-lead", ".intro-text", "p.summary"],
+        "author_sel":   [".author-name", ".reporter", ".byline"],
+        "date_sel":     ["time", ".publish-time", ".article-time", ".date"],
+        "image_sel":    ["article img.featured", ".news-thumb img", "article img"],
+        "rss":          "https://www.channel24bd.tv/feed",
+        "tier":         2,
+        "article_tier": 2,
+    },
+    "ekattor.tv": {
+        "headline_sel": [".title a", "h3 a", ".news-item a", "h2 a", ".article-title a"],
+        "link_sel":     [".title a", "h3 a", ".news-item a", "h2 a"],
+        "content_sel":  [".entry-content p", ".post-content p", "article p", ".news-body p"],
+        "summary_sel":  [".entry-summary", ".post-excerpt", ".lead"],
+        "author_sel":   [".author", ".byline", ".writer-name"],
+        "date_sel":     ["time", ".entry-date", ".published", ".date"],
+        "image_sel":    [".entry-content img", "article img", ".post-thumbnail img"],
+        "rss":          "https://ekattor.tv/feed",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "independent24.com": {
+        "headline_sel": ["h3 a", ".news-title a", ".card-title a", "h2 a", ".headline-text a"],
+        "link_sel":     ["h3 a", ".news-title a", ".card-title a", "h2 a"],
+        "content_sel":  [".entry-content p", ".post-body p", "article p", ".news-details p"],
+        "summary_sel":  [".excerpt", ".post-excerpt", ".lead", ".summary"],
+        "author_sel":   [".author-name", ".byline", ".reporter"],
+        "date_sel":     ["time", ".post-date", ".publish-date", ".date"],
+        "image_sel":    ["article img", ".post-thumbnail img", ".featured-image img"],
+        "rss":          "https://www.independent24.com/feed",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "ntvbd.com": {
+        "headline_sel": [".news-title a", "h3 a", ".title-link", "h2.post-title a", ".card-title a"],
+        "link_sel":     [".news-title a", "h3 a", ".title-link", "h2.post-title a"],
+        "content_sel":  [".details-text p", ".article-text p", ".entry-content p", "article p"],
+        "summary_sel":  [".news-summary", ".article-lead", ".excerpt"],
+        "author_sel":   [".reporter-name", ".author", ".byline"],
+        "date_sel":     ["time", ".date", ".news-date", ".publish-time"],
+        "image_sel":    [".news-details img", ".article-image img", "article img"],
+        "rss":          "https://www.ntvbd.com/rss",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "channelionline.com": {
+        "headline_sel": ["h3 a", ".news-heading a", ".title a", "h2 a", ".post-title a"],
+        "link_sel":     ["h3 a", ".news-heading a", ".title a", "h2 a"],
+        "content_sel":  [".post-content p", ".entry-content p", "article p", ".news-content p"],
+        "summary_sel":  [".post-excerpt", ".entry-summary", ".lead-text"],
+        "author_sel":   [".author", ".byline", ".post-author"],
+        "date_sel":     ["time", ".post-date", ".published-date"],
+        "image_sel":    [".post-thumbnail img", "article img", ".featured img"],
+        "rss":          "https://www.channelionline.com/feed",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "atnnewsltd.com": {
+        "headline_sel": ["h3 a", ".news-title a", "h2 a", ".article-title a", ".headline a"],
+        "link_sel":     ["h3 a", ".news-title a", "h2 a", ".article-title a"],
+        "content_sel":  ["article p", ".content p", ".news-body p", ".entry-content p"],
+        "summary_sel":  [".summary", ".lead", ".excerpt"],
+        "author_sel":   [".author", ".byline"],
+        "date_sel":     ["time", ".date", ".published"],
+        "image_sel":    ["article img", ".featured-img img"],
+        "rss":          None,
+        "tier":         2,
+        "article_tier": 2,
+    },
+    "dbcnews.tv": {
+        "headline_sel": [".title a", "h3 a", ".news-card a", "h2 a", ".story-title a"],
+        "link_sel":     [".title a", "h3 a", ".news-card a", "h2 a"],
+        "content_sel":  [".article-body p", ".news-body p", ".content-text p", "article p"],
+        "summary_sel":  [".article-summary", ".news-lead", ".intro"],
+        "author_sel":   [".reporter", ".author-name", ".byline"],
+        "date_sel":     ["time", ".date", ".news-time"],
+        "image_sel":    ["article img", ".news-img img"],
+        "rss":          "https://www.dbcnews.tv/feed",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "news24bd.tv": {
+        "headline_sel": ["h3 a", ".news-title a", ".top-news a", "h2 a", ".breaking a"],
+        "link_sel":     ["h3 a", ".news-title a", ".top-news a", "h2 a"],
+        "content_sel":  [".details-content p", ".news-content p", "article p", ".post-content p"],
+        "summary_sel":  [".news-lead", ".article-summary", ".lead"],
+        "author_sel":   [".reporter-name", ".author", ".byline"],
+        "date_sel":     ["time", ".publish-date", ".date"],
+        "image_sel":    ["article img", ".details-img img"],
+        "rss":          "https://www.news24bd.tv/rss",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "rtvonline.com": {
+        "headline_sel": [".news-title a", "h3 a", "h2 a", ".article-title a", ".card-title a"],
+        "link_sel":     [".news-title a", "h3 a", "h2 a", ".article-title a"],
+        "content_sel":  [".news-details p", ".article-content p", "article p", ".entry-content p"],
+        "summary_sel":  [".news-intro", ".article-lead", ".summary"],
+        "author_sel":   [".reporter", ".byline", ".author-name"],
+        "date_sel":     ["time", ".publish-time", ".date"],
+        "image_sel":    [".news-img img", "article img"],
+        "rss":          "https://www.rtvonline.com/feed",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "bvnews24.com": {
+        "headline_sel": ["h3 a", ".title a", ".news-title a", "h2 a", ".headline-text a"],
+        "link_sel":     ["h3 a", ".title a", ".news-title a", "h2 a"],
+        "content_sel":  [".entry-content p", ".post-content p", "article p"],
+        "summary_sel":  [".excerpt", ".entry-summary", ".lead"],
+        "author_sel":   [".author", ".byline"],
+        "date_sel":     ["time", ".date", ".post-date"],
+        "image_sel":    [".featured img", "article img"],
+        "rss":          "https://www.bvnews24.com/feed",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "ekushey-tv.com": {
+        "headline_sel": [".news-title a", "h3 a", "h2 a", ".post-title a", ".card-title a"],
+        "link_sel":     [".news-title a", "h3 a", "h2 a", ".post-title a"],
+        "content_sel":  [".entry-content p", ".post-content p", "article p"],
+        "summary_sel":  [".entry-summary", ".excerpt"],
+        "author_sel":   [".author", ".byline"],
+        "date_sel":     ["time", ".date", ".published"],
+        "image_sel":    ["article img", ".post-thumbnail img"],
+        "rss":          "https://ekushey-tv.com/feed",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "maasranga.tv": {
+        "headline_sel": ["h3 a", ".title a", ".news-item-title a", "h2 a", ".article a"],
+        "link_sel":     ["h3 a", ".title a", ".news-item-title a", "h2 a"],
+        "content_sel":  ["article p", ".news-content p", ".details-text p", ".entry-content p"],
+        "summary_sel":  [".lead", ".summary", ".intro"],
+        "author_sel":   [".reporter", ".author", ".byline"],
+        "date_sel":     ["time", ".date", ".news-date"],
+        "image_sel":    ["article img", ".thumb img"],
+        "rss":          "https://www.maasranga.tv/feed",
+        "tier":         2,
+        "article_tier": 2,
+    },
+    "btv.gov.bd": {
+        "headline_sel": ["h3 a", ".news-title a", "h2 a", ".headline a", ".article-title a"],
+        "link_sel":     ["h3 a", ".news-title a", "h2 a"],
+        "content_sel":  [".entry-content p", "article p", ".news-body p"],
+        "summary_sel":  [".excerpt", ".summary"],
+        "author_sel":   [".author", ".byline"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img", ".featured img"],
+        "rss":          None,
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "boishakhionline.com": {
+        "headline_sel": [".news-title a", "h3 a", "h2 a", ".article-title a", ".card-title a"],
+        "link_sel":     [".news-title a", "h3 a", "h2 a"],
+        "content_sel":  [".entry-content p", ".post-content p", "article p"],
+        "summary_sel":  [".excerpt", ".lead"],
+        "author_sel":   [".author", ".byline"],
+        "date_sel":     ["time", ".date", ".post-date"],
+        "image_sel":    ["article img", ".featured img"],
+        "rss":          "https://www.boishakhionline.com/feed",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "desh.tv": {
+        "headline_sel": ["h3 a", ".title a", ".news-card-title a", "h2 a", ".headline a"],
+        "link_sel":     ["h3 a", ".title a", ".news-card-title a", "h2 a"],
+        "content_sel":  ["article p", ".news-content p", ".details-body p"],
+        "summary_sel":  [".news-lead", ".summary", ".intro"],
+        "author_sel":   [".reporter", ".author"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://www.desh.tv/feed",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "nagorik.tv": {
+        "headline_sel": ["h3 a", ".news-title a", "h2 a", ".post-title a", ".card-title a"],
+        "link_sel":     ["h3 a", ".news-title a", "h2 a"],
+        "content_sel":  ["article p", ".entry-content p", ".post-content p"],
+        "summary_sel":  [".excerpt", ".lead"],
+        "author_sel":   [".author", ".byline"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img"],
+        "rss":          None,
+        "tier":         2,
+        "article_tier": 2,
+    },
+    "globaltvbd.com": {
+        "headline_sel": ["h3 a", ".title a", ".news-title a", "h2 a", ".article-title a"],
+        "link_sel":     ["h3 a", ".title a", ".news-title a", "h2 a"],
+        "content_sel":  ["article p", ".news-content p", ".entry-content p"],
+        "summary_sel":  [".lead", ".summary"],
+        "author_sel":   [".author"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img"],
+        "rss":          None,
+        "tier":         2,
+        "article_tier": 2,
+    },
+    "asiantvonline.com": {
+        "headline_sel": ["h3 a", ".title a", ".news-title a", "h2 a"],
+        "link_sel":     ["h3 a", ".title a", "h2 a"],
+        "content_sel":  ["article p", ".entry-content p"],
+        "summary_sel":  [".excerpt", ".lead"],
+        "author_sel":   [".author"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img"],
+        "rss":          None,
+        "tier":         1,
+        "article_tier": 1,
+    },
+
+    # ══════════════════════════════════════════════════════
+    # BANGLADESH NEWSPAPERS
+    # ══════════════════════════════════════════════════════
+
+    "prothomalo.com": {
+        "headline_sel": ["h3.title a", ".story-card__title a", "h2 a", ".headline-text a", "h3 a"],
+        "link_sel":     ["h3.title a", ".story-card__title a", "h2 a"],
+        "content_sel":  [".story-element-text p", ".article-text p", ".palo-content p", "article p"],
+        "summary_sel":  [".story-element-text-summary", ".article-summary", ".lead"],
+        "author_sel":   [".reporter-name a", ".author-name", ".byline-name"],
+        "date_sel":     ["time", ".story-time", ".publish-date"],
+        "image_sel":    [".story-element-image img", "article img"],
+        "rss":          "https://www.prothomalo.com/feed",
+        "tier":         2,
+        "article_tier": 2,
+    },
+    "bd-pratidin.com": {
+        "headline_sel": [".title a", "h3 a", "h2 a", ".news-title a", ".post-title a"],
+        "link_sel":     [".title a", "h3 a", "h2 a", ".news-title a"],
+        "content_sel":  [".details-body p", ".news-details p", "article p", ".content p"],
+        "summary_sel":  [".news-lead", ".summary", ".intro-text"],
+        "author_sel":   [".reporter-name", ".author", ".byline"],
+        "date_sel":     ["time", ".date", ".publish-time"],
+        "image_sel":    [".news-details img", "article img"],
+        "rss":          "https://www.bd-pratidin.com/rss",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "jugantor.com": {
+        "headline_sel": ["h3 a", ".title a", ".news-title a", "h2 a", ".headline a"],
+        "link_sel":     ["h3 a", ".title a", ".news-title a", "h2 a"],
+        "content_sel":  [".news-body p", ".article-content p", "article p", ".entry-content p"],
+        "summary_sel":  [".news-summary", ".lead", ".excerpt"],
+        "author_sel":   [".reporter", ".author-name", ".byline"],
+        "date_sel":     ["time", ".news-date", ".published-date"],
+        "image_sel":    [".news-details img", "article img", ".featured-img img"],
+        "rss":          "https://www.jugantor.com/rss",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "kalerkantho.com": {
+        "headline_sel": [".title a", "h3 a", "h2 a", ".news-title a", ".headline a"],
+        "link_sel":     [".title a", "h3 a", "h2 a", ".news-title a"],
+        "content_sel":  [".detail-body p", ".article-text p", "article p", ".content-area p"],
+        "summary_sel":  [".detail-summary", ".article-lead", ".news-intro"],
+        "author_sel":   [".reporter", ".author", ".byline-name"],
+        "date_sel":     ["time", ".news-time", ".date"],
+        "image_sel":    [".detail-photo img", "article img"],
+        "rss":          "https://www.kalerkantho.com/rss.xml",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "ittefaq.com.bd": {
+        "headline_sel": ["h3 a", ".news-title a", "h2 a", ".title a", ".story-title a"],
+        "link_sel":     ["h3 a", ".news-title a", "h2 a", ".title a"],
+        "content_sel":  [".article-detail p", ".news-content p", "article p"],
+        "summary_sel":  [".article-intro", ".news-lead", ".summary"],
+        "author_sel":   [".author-name", ".reporter", ".byline"],
+        "date_sel":     ["time", ".date", ".publish-time"],
+        "image_sel":    ["article img", ".article-image img"],
+        "rss":          "https://www.ittefaq.com.bd/feed",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "samakal.com": {
+        "headline_sel": [".title a", "h3 a", "h2 a", ".news-title a", ".card-title a"],
+        "link_sel":     [".title a", "h3 a", "h2 a", ".news-title a"],
+        "content_sel":  [".article-body p", ".news-article p", "article p", ".content p"],
+        "summary_sel":  [".article-summary", ".lead-text", ".intro"],
+        "author_sel":   [".reporter-name", ".byline", ".author"],
+        "date_sel":     ["time", ".article-time", ".date"],
+        "image_sel":    ["article img", ".article-img img"],
+        "rss":          "https://samakal.com/feed",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "dainikamadershomoy.com": {
+        "headline_sel": ["h3 a", ".title a", ".news-title a", "h2 a", ".post-title a"],
+        "link_sel":     ["h3 a", ".title a", ".news-title a", "h2 a"],
+        "content_sel":  [".entry-content p", ".post-content p", "article p"],
+        "summary_sel":  [".excerpt", ".entry-summary", ".lead"],
+        "author_sel":   [".author", ".byline"],
+        "date_sel":     ["time", ".post-date", ".date"],
+        "image_sel":    ["article img", ".post-thumbnail img"],
+        "rss":          "https://www.dainikamadershomoy.com/feed",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "dailyjanakantha.com": {
+        "headline_sel": [".title a", "h3 a", "h2 a", ".news-title a", ".headline a"],
+        "link_sel":     [".title a", "h3 a", "h2 a", ".news-title a"],
+        "content_sel":  [".details-body p", ".article-content p", "article p"],
+        "summary_sel":  [".news-lead", ".article-summary", ".intro"],
+        "author_sel":   [".reporter", ".author-name", ".byline"],
+        "date_sel":     ["time", ".date", ".news-date"],
+        "image_sel":    ["article img", ".news-img img"],
+        "rss":          "https://www.dailyjanakantha.com/rss",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "mzamin.com": {
+        "headline_sel": ["h3 a", ".title a", ".news-title a", "h2 a", ".post-title a"],
+        "link_sel":     ["h3 a", ".title a", ".news-title a", "h2 a"],
+        "content_sel":  [".entry-content p", ".article-body p", "article p"],
+        "summary_sel":  [".excerpt", ".lead"],
+        "author_sel":   [".author", ".byline"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://mzamin.com/feed",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "dailynayadiganta.com": {
+        "headline_sel": [".title a", "h3 a", "h2 a", ".news-title a", ".headline a"],
+        "link_sel":     [".title a", "h3 a", "h2 a"],
+        "content_sel":  [".news-body p", ".article-text p", "article p"],
+        "summary_sel":  [".news-lead", ".summary"],
+        "author_sel":   [".reporter", ".author"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://www.dailynayadiganta.com/rss",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "bhorerkagoj.com": {
+        "headline_sel": ["h3 a", ".title a", ".news-title a", "h2 a", ".card-title a"],
+        "link_sel":     ["h3 a", ".title a", ".news-title a", "h2 a"],
+        "content_sel":  [".entry-content p", ".post-content p", "article p"],
+        "summary_sel":  [".excerpt", ".lead"],
+        "author_sel":   [".author", ".byline"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://www.bhorerkagoj.com/feed",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "dailyinqilab.com": {
+        "headline_sel": [".title a", "h3 a", "h2 a", ".news-title a", ".post-title a"],
+        "link_sel":     [".title a", "h3 a", "h2 a"],
+        "content_sel":  ["article p", ".entry-content p", ".news-content p"],
+        "summary_sel":  [".excerpt", ".lead"],
+        "author_sel":   [".author"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://www.dailyinqilab.com/rss",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "jaijaidinbd.com": {
+        "headline_sel": ["h3 a", ".title a", ".news-title a", "h2 a", ".headline a"],
+        "link_sel":     ["h3 a", ".title a", "h2 a"],
+        "content_sel":  [".entry-content p", ".article-body p", "article p"],
+        "summary_sel":  [".excerpt", ".lead"],
+        "author_sel":   [".author"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://www.jaijaidinbd.com/feed",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "sangbad.net.bd": {
+        "headline_sel": [".title a", "h3 a", "h2 a", ".news-title a", ".post-title a"],
+        "link_sel":     [".title a", "h3 a", "h2 a"],
+        "content_sel":  ["article p", ".entry-content p"],
+        "summary_sel":  [".excerpt"],
+        "author_sel":   [".author"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://sangbad.net.bd/feed",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "ajkerpatrika.com": {
+        "headline_sel": ["h3 a", ".title a", ".news-title a", "h2 a", ".card-title a"],
+        "link_sel":     ["h3 a", ".title a", "h2 a"],
+        "content_sel":  ["article p", ".news-content p", ".entry-content p"],
+        "summary_sel":  [".lead", ".excerpt"],
+        "author_sel":   [".author"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://www.ajkerpatrika.com/feed",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "kalbela.com": {
+        "headline_sel": [".title a", "h3 a", "h2 a", ".news-title a", ".headline a"],
+        "link_sel":     [".title a", "h3 a", "h2 a"],
+        "content_sel":  [".details-content p", ".article-text p", "article p"],
+        "summary_sel":  [".news-lead", ".intro"],
+        "author_sel":   [".reporter", ".author"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://kalbela.com/feed",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "bonikbarta.net": {
+        "headline_sel": ["h3 a", ".title a", ".news-title a", "h2 a", ".post-title a"],
+        "link_sel":     ["h3 a", ".title a", "h2 a"],
+        "content_sel":  [".entry-content p", "article p", ".post-content p"],
+        "summary_sel":  [".excerpt", ".lead"],
+        "author_sel":   [".author"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://bonikbarta.net/feed",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "deshrupantor.com": {
+        "headline_sel": [".title a", "h3 a", "h2 a", ".news-title a", ".card-title a"],
+        "link_sel":     [".title a", "h3 a", "h2 a"],
+        "content_sel":  ["article p", ".entry-content p", ".news-body p"],
+        "summary_sel":  [".lead", ".excerpt"],
+        "author_sel":   [".author"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://deshrupantor.com/feed",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "alokitobangladesh.com": {
+        "headline_sel": ["h3 a", ".title a", ".news-title a", "h2 a", ".headline a"],
+        "link_sel":     ["h3 a", ".title a", "h2 a"],
+        "content_sel":  ["article p", ".entry-content p"],
+        "summary_sel":  [".lead", ".excerpt"],
+        "author_sel":   [".author"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://www.alokitobangladesh.com/feed",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "dainikbangla.com.bd": {
+        "headline_sel": [".title a", "h3 a", "h2 a", ".news-title a", ".post-title a"],
+        "link_sel":     [".title a", "h3 a", "h2 a"],
+        "content_sel":  ["article p", ".entry-content p", ".news-content p"],
+        "summary_sel":  [".lead", ".excerpt"],
+        "author_sel":   [".author"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://dainikbangla.com.bd/feed",
+        "tier":         1,
+        "article_tier": 1,
+    },
+
+    # ══════════════════════════════════════════════════════
+    # INDIAN NEWS OUTLETS
+    # ══════════════════════════════════════════════════════
+
+    "timesofindia.indiatimes.com": {
+        "headline_sel": ["figcaption.caption a", "h3.w_tle a", "span.w_tle", "h2 a", ".news-card-title a"],
+        "link_sel":     ["figcaption.caption a", "h3.w_tle a", "h2 a"],
+        "content_sel":  ["div._s30J p", "div.ga4G3p p", "article p", "div[class*='articleText'] p"],
+        "summary_sel":  ["p._3HHqE", ".article-intro", ".summary"],
+        "author_sel":   [".author", ".byline", "span._2byYu"],
+        "date_sel":     ["time", "span.ZxBIG", ".article-time"],
+        "image_sel":    ["article img", ".article-image img"],
+        "rss":          "https://timesofindia.indiatimes.com/rssfeedstopstories.cms",
+        "tier":         3,
+        "article_tier": 3,
+    },
+    "ndtv.com": {
+        "headline_sel": [".news_Itm-title", "h2 a", ".NwSLstPg_ttl", ".article__heading a", "h3 a"],
+        "link_sel":     [".news_Itm-title", "h2 a", ".NwSLstPg_ttl a"],
+        "content_sel":  [".sp-cn p", "div.Art_KV3s p", ".article__content p", "article p"],
+        "summary_sel":  [".article__intro", ".sp-smry", ".news-intro"],
+        "author_sel":   [".author__name", ".byline__name", ".posted-by"],
+        "date_sel":     ["time", ".article__time", "span._pubtime"],
+        "image_sel":    ["article img", ".article__image img"],
+        "rss":          "https://feeds.feedburner.com/ndtvnews-top-stories",
+        "tier":         3,
+        "article_tier": 3,
+    },
+    "hindustantimes.com": {
+        "headline_sel": ["h3.hdg3 a", ".storycard__headline a", "h2 a", ".listingPage h3 a", "h3 a"],
+        "link_sel":     ["h3.hdg3 a", ".storycard__headline a", "h2 a"],
+        "content_sel":  ["div.storyDetails p", ".detail p", "article p", ".storyDetail p"],
+        "summary_sel":  [".intro-txt", ".story-summary", ".lead"],
+        "author_sel":   [".authorInformation", ".byline", ".author"],
+        "date_sel":     ["time", ".datePublish", ".story-date"],
+        "image_sel":    ["article img", ".storyImgCont img"],
+        "rss":          "https://www.hindustantimes.com/feeds/rss/india-news/rssfeed.xml",
+        "tier":         3,
+        "article_tier": 3,
+    },
+    "thehindu.com": {
+        "headline_sel": ["h3.title a", "h2.title a", ".story-card-33sq__title a", "h3 a", ".card-title a"],
+        "link_sel":     ["h3.title a", "h2.title a", ".story-card-33sq__title a"],
+        "content_sel":  ["div._3WrFV p", ".article p", "article p", ".paywall p"],
+        "summary_sel":  [".intro", ".article-intro", "p.intro-para"],
+        "author_sel":   [".author-name", ".byline-name", ".lft span"],
+        "date_sel":     ["time", ".publish-time-new", ".update-time"],
+        "image_sel":    ["article img", ".lead-img img"],
+        "rss":          "https://www.thehindu.com/news/national/feeder/default.rss",
+        "tier":         2,
+        "article_tier": 2,
+    },
+    "indianexpress.com": {
+        "headline_sel": ["h2.title a", "h3 a", ".articles h2 a", "h2 a"],
+        "link_sel":     ["h2.title a", "h3 a", ".articles h2 a"],
+        "content_sel":  ["div.story_details p", ".ie-content p", "article p"],
+        "summary_sel":  [".story-intro", ".ie-intro", ".lead"],
+        "author_sel":   [".ie-byline-name", ".author-name", ".byline"],
+        "date_sel":     ["time", ".ie-updated-date", ".date-updated"],
+        "image_sel":    ["article img", ".custom-caption img"],
+        "rss":          "https://indianexpress.com/feed/",
+        "tier":         2,
+        "article_tier": 2,
+    },
+    "aajtak.in": {
+        "headline_sel": [".story__title a", "h3 a", ".news-title a", "h2 a"],
+        "link_sel":     [".story__title a", "h3 a", "h2 a"],
+        "content_sel":  [".story-with-style p", ".field-items p", "article p"],
+        "summary_sel":  [".story-intro", ".field-intro p"],
+        "author_sel":   [".author-name", ".byline"],
+        "date_sel":     ["time", ".story-date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://feeds.feedburner.com/aajtak/fZAf",
+        "tier":         3,
+        "article_tier": 3,
+    },
+    "indiatoday.in": {
+        "headline_sel": [".story__title a", "h2 a", ".listingNew h2 a", ".field-title a", "h3 a"],
+        "link_sel":     [".story__title a", "h2 a", ".field-title a"],
+        "content_sel":  [".story-with-style p", ".description p", "article p"],
+        "summary_sel":  [".story-kicker", ".intro-text", ".lead"],
+        "author_sel":   [".author-name", ".story__author"],
+        "date_sel":     ["time", ".story-date"],
+        "image_sel":    ["article img", ".media-element img"],
+        "rss":          "https://www.indiatoday.in/rss/home",
+        "tier":         3,
+        "article_tier": 3,
+    },
+    "economictimes.indiatimes.com": {
+        "headline_sel": ["h3.clr a", "figcaption a", ".eachStory h3 a", "h2 a"],
+        "link_sel":     ["h3.clr a", "figcaption a", ".eachStory h3 a"],
+        "content_sel":  [".artText p", ".article-body p", "article p"],
+        "summary_sel":  [".summary", ".article-intro", ".lead"],
+        "author_sel":   [".author-name", ".byline"],
+        "date_sel":     ["time", ".publish_on", ".art_time"],
+        "image_sel":    ["article img"],
+        "rss":          "https://economictimes.indiatimes.com/rssfeedsdefault.cms",
+        "tier":         3,
+        "article_tier": 3,
+    },
+    "news18.com": {
+        "headline_sel": ["h3 a", ".jsx-story-list h3 a", ".top_story h3 a", "h2 a"],
+        "link_sel":     ["h3 a", ".top_story h3 a", "h2 a"],
+        "content_sel":  [".article-body p", ".story-content p", "article p"],
+        "summary_sel":  [".article-intro", ".story-intro"],
+        "author_sel":   [".author", ".byline"],
+        "date_sel":     ["time", ".story-date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://www.news18.com/rss/india.xml",
+        "tier":         2,
+        "article_tier": 2,
+    },
+    "livemint.com": {
+        "headline_sel": ["h2.headline a", "h3 a", ".listingNew h2 a", ".storyCard__headline a", "h2 a"],
+        "link_sel":     ["h2.headline a", "h3 a", ".storyCard__headline a"],
+        "content_sel":  ["div.storyPage__content p", ".mint-content p", "article p"],
+        "summary_sel":  [".storyPage__intro", ".story-summary"],
+        "author_sel":   [".author-name", ".byline"],
+        "date_sel":     ["time", ".storyDate"],
+        "image_sel":    ["article img"],
+        "rss":          "https://www.livemint.com/rss/news",
+        "tier":         3,
+        "article_tier": 3,
+    },
+
+    # ══════════════════════════════════════════════════════
+    # INTERNATIONAL SOURCES
+    # ══════════════════════════════════════════════════════
+
+    "aljazeera.com": {
+        "headline_sel": ["h3.article-card__title a", "h2 a", ".article-card a h3", "h3 a"],
+        "link_sel":     ["h3.article-card__title a", "h2 a", ".article-card__title a"],
+        "content_sel":  [".wysiwyg p", ".article-body p", "article p", "div[class*='article-p-wrapper'] p"],
+        "summary_sel":  [".article-header__sub-title", ".article-intro", ".article__subline"],
+        "author_sel":   [".article-author__name", ".author-link", ".author"],
+        "date_sel":     ["time", ".date-simple span", ".article-dates__published"],
+        "image_sel":    ["figure.article-featured-image img", "article img"],
+        "rss":          "https://www.aljazeera.com/xml/rss/all.xml",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "bbc.com": {
+        "headline_sel": ["h3[data-testid='card-headline']", "h2[data-testid='card-headline']", ".gs-c-promo-heading__title", "h3 a"],
+        "link_sel":     ["h3[data-testid='card-headline']", "h2[data-testid='card-headline']", ".gs-c-promo-heading__title"],
+        "content_sel":  ["article[data-component='text-block'] p", "div[data-component='text-block'] p", ".ssrcss-uf6wea p", "article p"],
+        "summary_sel":  ["p[class*='Intro']", ".ssrcss-intro p", ".article-headline__intro"],
+        "author_sel":   [".ssrcss-1pjc44a-Contributor", ".author", "[data-testid='byline-name']"],
+        "date_sel":     ["time", "[data-testid='timestamp']"],
+        "image_sel":    ["article img", "[data-testid='hero-image'] img"],
+        "rss":          "http://feeds.bbci.co.uk/news/rss.xml",
+        "tier":         2,
+        "article_tier": 2,
+    },
+    "theguardian.com": {
+        "headline_sel": ["h3.fc-item__title a", ".js-headline-text", "h3 a", "h2 a"],
+        "link_sel":     ["h3.fc-item__title a", ".js-headline-text", "h3 a"],
+        "content_sel":  ["div.article-body-commercial-selector p", ".dcr-1kas2f8 p", "article p"],
+        "summary_sel":  ["div.dcr-standfirst p", ".standfirst p", ".article-intro"],
+        "author_sel":   [".byline", ".contributor a", ".dcr-1kcl8ec"],
+        "date_sel":     ["time", "[data-testid='date-line']"],
+        "image_sel":    ["article img", "figure.dcr-f9dqld img"],
+        "rss":          "https://www.theguardian.com/world/rss",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "reuters.com": {
+        "headline_sel": ["a[data-testid='Heading']", "h3 a", ".story-title", "h2 a"],
+        "link_sel":     ["a[data-testid='Heading']", ".story-title a", "h3 a"],
+        "content_sel":  ["p[class*='article__paragraph']", ".article-body p", "article p"],
+        "summary_sel":  ["p[class*='ArticleHeader_intro']", ".article-summary"],
+        "author_sel":   [".author-name", ".byline", "[class*='byline']"],
+        "date_sel":     ["time", "[class*='date']"],
+        "image_sel":    ["article img", "[class*='image'] img"],
+        "rss":          "https://feeds.reuters.com/reuters/topNews",
+        "tier":         3,
+        "article_tier": 3,
+    },
+    "apnews.com": {
+        "headline_sel": [".PagePromo-title a", "h3 a", ".CardHeadline a", ".Component-headline a", "h2 a"],
+        "link_sel":     [".PagePromo-title a", "h3 a", ".CardHeadline a"],
+        "content_sel":  [".RichTextStoryBody p", ".Article p", "article p"],
+        "summary_sel":  [".RichTextStoryBody p:first-child", ".article-intro"],
+        "author_sel":   [".Component-bylines", ".byline"],
+        "date_sel":     ["time", "[data-key='timestamp']"],
+        "image_sel":    ["article img", ".Image img"],
+        "rss":          "https://rsshub.app/apnews/topics/apf-topnews",
+        "tier":         2,
+        "article_tier": 2,
+    },
+    "asia.nikkei.com": {
+        "headline_sel": ["h3.t-story__title a", "h2 a", ".article-title a", "h3 a"],
+        "link_sel":     ["h3.t-story__title a", "h2 a"],
+        "content_sel":  [".article-body__content p", ".c-article__body p", "article p"],
+        "summary_sel":  [".article-intro", ".story-intro"],
+        "author_sel":   [".author-name", ".byline"],
+        "date_sel":     ["time", ".article-date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://asia.nikkei.com/rss/feed/nar",
+        "tier":         3,
+        "article_tier": 3,
+    },
+    "scmp.com": {
+        "headline_sel": ["h2[itemprop='headline'] a", "h3 a", ".article__title a", "h2 a"],
+        "link_sel":     ["h2[itemprop='headline'] a", ".article__title a", "h3 a"],
+        "content_sel":  ["div[class*='articleBody'] p", ".article-body p", "article p"],
+        "summary_sel":  [".article__description", ".article-intro"],
+        "author_sel":   [".author__link", ".byline"],
+        "date_sel":     ["time", "[itemprop='datePublished']"],
+        "image_sel":    ["article img"],
+        "rss":          "https://www.scmp.com/rss/91/feed",
+        "tier":         3,
+        "article_tier": 3,
+    },
+    "dw.com": {
+        "headline_sel": [".news-item__title", "h3 a", ".small-teaser__headline", "h2 a"],
+        "link_sel":     [".news-item__title a", "h3 a", ".small-teaser__headline a"],
+        "content_sel":  [".longText p", ".article-text p", "article p"],
+        "summary_sel":  [".intro p", ".article-intro", ".teaser p"],
+        "author_sel":   [".author", ".byline"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://rss.dw.com/rdf/rss-en-all",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "voabangla.com": {
+        "headline_sel": ["h4.media-block__title a", "h3 a", ".title a", "h2 a"],
+        "link_sel":     ["h4.media-block__title a", "h3 a", ".title a"],
+        "content_sel":  ["div.wsw p", ".article-content p", "article p"],
+        "summary_sel":  [".description p", ".article-intro"],
+        "author_sel":   [".authors", ".byline"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://www.voabangla.com/api/zmorqmveiq",
+        "tier":         1,
+        "article_tier": 1,
+    },
+
+    # ══════════════════════════════════════════════════════
+    # ASIAN / REGIONAL
+    # ══════════════════════════════════════════════════════
+
+    "channelnewsasia.com": {
+        "headline_sel": ["h6 a", "h3.h6 a", ".card-title a", ".media-object__title a", "h3 a"],
+        "link_sel":     ["h6 a", "h3.h6 a", ".card-title a"],
+        "content_sel":  [".text-long p", ".article__body p", "article p"],
+        "summary_sel":  [".article__summary", ".lead"],
+        "author_sel":   [".author", ".byline"],
+        "date_sel":     ["time", ".article__date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://www.channelnewsasia.com/rssfeeds/8395986",
+        "tier":         2,
+        "article_tier": 2,
+    },
+    "straitstimes.com": {
+        "headline_sel": ["h5 a.stretched-link", "h2 a", ".story-headline a", "h3 a"],
+        "link_sel":     ["h5 a.stretched-link", "h2 a", ".story-headline a"],
+        "content_sel":  ["div[class*='article-body'] p", ".field-body p", "article p"],
+        "summary_sel":  [".article__summary", ".intro"],
+        "author_sel":   [".article-author", ".byline"],
+        "date_sel":     ["time", ".article__date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://www.straitstimes.com/news/asia/rss.xml",
+        "tier":         3,
+        "article_tier": 3,
+    },
+    "asiatimes.com": {
+        "headline_sel": ["h3.entry-title a", "h2.entry-title a", ".post-title a", "h3 a", "h2 a"],
+        "link_sel":     ["h3.entry-title a", "h2.entry-title a", ".post-title a"],
+        "content_sel":  [".entry-content p", ".post-content p", "article p"],
+        "summary_sel":  [".entry-summary p", ".excerpt"],
+        "author_sel":   [".author-name", ".byline"],
+        "date_sel":     ["time", ".post-date"],
+        "image_sel":    ["article img", ".post-thumbnail img"],
+        "rss":          "https://asiatimes.com/feed/",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "japantimes.co.jp": {
+        "headline_sel": ["h2.article-title a", "h3 a", ".article__title a", "h2 a"],
+        "link_sel":     ["h2.article-title a", "h3 a", ".article__title a"],
+        "content_sel":  [".article__text p", ".article-content p", "article p"],
+        "summary_sel":  [".article__intro", ".intro"],
+        "author_sel":   [".article__author", ".byline"],
+        "date_sel":     ["time", ".article__date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://www.japantimes.co.jp/feed/",
+        "tier":         2,
+        "article_tier": 2,
+    },
+    "bangkokpost.com": {
+        "headline_sel": ["h3.article-title a", "h2 a", ".news-list h3 a", "h3 a"],
+        "link_sel":     ["h3.article-title a", "h2 a", ".news-list h3 a"],
+        "content_sel":  [".article-content p", ".story-body p", "article p"],
+        "summary_sel":  [".article-intro", ".intro-text"],
+        "author_sel":   [".author", ".byline"],
+        "date_sel":     ["time", ".article-date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://www.bangkokpost.com/rss/data/topstories.xml",
+        "tier":         2,
+        "article_tier": 2,
+    },
+    "asianews.network": {
+        "headline_sel": ["h2 a", "h3 a", ".entry-title a", ".post-title a"],
+        "link_sel":     ["h2 a", "h3 a", ".entry-title a"],
+        "content_sel":  [".entry-content p", ".post-content p", "article p"],
+        "summary_sel":  [".entry-summary", ".excerpt"],
+        "author_sel":   [".author"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://asianews.network/feed/",
+        "tier":         1,
+        "article_tier": 1,
+    },
+
+    # ══════════════════════════════════════════════════════
+    # PREVIOUSLY CONFIGURED OUTLETS
+    # ══════════════════════════════════════════════════════
+
+    "bangla.bdnews24.com": {
+        "headline_sel": [".archive-title a", "h2.entry-title a", "h3 a", ".title a"],
+        "link_sel":     [".archive-title a", "h2.entry-title a", "h3 a"],
+        "content_sel":  [".entry-content p", ".article-body p", "article p"],
+        "summary_sel":  [".excerpt", ".lead"],
+        "author_sel":   [".author"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://bangla.bdnews24.com/feed",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "jagonews24.com": {
+        "headline_sel": ["h3 a", ".title a", ".news-title a", "h2 a"],
+        "link_sel":     ["h3 a", ".title a", "h2 a"],
+        "content_sel":  [".news-details p", "article p", ".entry-content p"],
+        "summary_sel":  [".news-lead", ".lead"],
+        "author_sel":   [".reporter", ".author"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://www.jagonews24.com/rss",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "banglatribune.com": {
+        "headline_sel": [".title a", "h3 a", "h2 a", ".news-title a"],
+        "link_sel":     [".title a", "h3 a", "h2 a"],
+        "content_sel":  ["article p", ".news-content p", ".entry-content p"],
+        "summary_sel":  [".lead", ".intro"],
+        "author_sel":   [".reporter", ".author"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://www.banglatribune.com/feed",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "thedailystar.net": {
+        "headline_sel": ["h3.title a", ".title-news a", "h2 a", ".card-title a", "h3 a"],
+        "link_sel":     ["h3.title a", ".title-news a", "h2 a"],
+        "content_sel":  [".field-body p", ".article-body p", "article p"],
+        "summary_sel":  [".field-intro p", ".article-intro"],
+        "author_sel":   [".author", ".byline"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://www.thedailystar.net/feed",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "dhakatribune.com": {
+        "headline_sel": ["h3.title a", "h2 a", ".card-title a", ".article-title a", "h3 a"],
+        "link_sel":     ["h3.title a", "h2 a", ".card-title a"],
+        "content_sel":  [".article-body p", ".entry-content p", "article p"],
+        "summary_sel":  [".article-intro", ".lead"],
+        "author_sel":   [".author", ".byline"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://www.dhakatribune.com/feed",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "tbsnews.net": {
+        "headline_sel": [".title a", "h3 a", "h2 a", ".card-title a"],
+        "link_sel":     [".title a", "h3 a", "h2 a"],
+        "content_sel":  ["article p", ".story-content p", ".entry-content p"],
+        "summary_sel":  [".lead", ".intro"],
+        "author_sel":   [".author"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://www.tbsnews.net/feed",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "anandabazar.com": {
+        "headline_sel": ["h2 a", "h3 a", ".title a", ".story-title a"],
+        "link_sel":     ["h2 a", "h3 a", ".title a"],
+        "content_sel":  [".articleBody p", ".story-content p", "article p"],
+        "summary_sel":  [".story-intro", ".summary"],
+        "author_sel":   [".reporter-name", ".author"],
+        "date_sel":     ["time", ".published-date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://www.anandabazar.com/rss",
+        "tier":         3,
+        "article_tier": 3,
+    },
+    "sangbadpratidin.in": {
+        "headline_sel": ["h2 a", "h3 a", ".title a", ".news-title a"],
+        "link_sel":     ["h2 a", "h3 a", ".title a"],
+        "content_sel":  [".article-body p", ".entry-content p", "article p"],
+        "summary_sel":  [".lead", ".intro"],
+        "author_sel":   [".author"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://www.sangbadpratidin.in/feed",
+        "tier":         2,
+        "article_tier": 2,
+    },
+    "bengali.abplive.com": {
+        "headline_sel": ["h3 a", ".post-title a", "h2 a", ".card-title a"],
+        "link_sel":     ["h3 a", ".post-title a", "h2 a"],
+        "content_sel":  [".article-body p", ".story-content p", "article p"],
+        "summary_sel":  [".article-intro", ".lead"],
+        "author_sel":   [".author"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://bengali.abplive.com/feed",
+        "tier":         2,
+        "article_tier": 2,
+    },
+    "zee24ghanta.com": {
+        "headline_sel": ["h2 a", "h3 a", ".title a", ".news-title a"],
+        "link_sel":     ["h2 a", "h3 a", ".title a"],
+        "content_sel":  [".article-body p", ".story-content p", "article p"],
+        "summary_sel":  [".article-intro", ".lead"],
+        "author_sel":   [".author"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://www.zee24ghanta.com/feed",
+        "tier":         2,
+        "article_tier": 2,
+    },
+    "eisamay.com": {
+        "headline_sel": ["h3 a", "h2 a", ".title a", ".news-title a"],
+        "link_sel":     ["h3 a", "h2 a", ".title a"],
+        "content_sel":  [".article-body p", ".entry-content p", "article p"],
+        "summary_sel":  [".intro", ".lead"],
+        "author_sel":   [".author"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://eisamay.com/rss",
+        "tier":         2,
+        "article_tier": 2,
+    },
+    "bartamanpatrika.com": {
+        "headline_sel": ["h2 a", "h3 a", ".title a"],
+        "link_sel":     ["h2 a", "h3 a"],
+        "content_sel":  ["article p", ".entry-content p"],
+        "summary_sel":  [".lead"],
+        "author_sel":   [".author"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img"],
+        "rss":          None,
+        "tier":         2,
+        "article_tier": 2,
+    },
+    "observerbd.com": {
+        "headline_sel": ["h3 a", ".title a", ".news-title a", "h2 a"],
+        "link_sel":     ["h3 a", ".title a", "h2 a"],
+        "content_sel":  ["article p", ".entry-content p", ".news-content p"],
+        "summary_sel":  [".lead", ".excerpt"],
+        "author_sel":   [".author"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://www.observerbd.com/feed",
+        "tier":         1,
+        "article_tier": 1,
+    },
+    "amar-desh24.com": {
+        "headline_sel": ["h3 a", ".title a", ".news-title a", "h2 a"],
+        "link_sel":     ["h3 a", ".title a", "h2 a"],
+        "content_sel":  ["article p", ".news-body p", ".entry-content p"],
+        "summary_sel":  [".lead", ".intro"],
+        "author_sel":   [".author"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img"],
+        "rss":          None,
+        "tier":         2,
+        "article_tier": 2,
+    },
+    "jjdin.com": {
+        "headline_sel": ["h3 a", ".title a", "h2 a"],
+        "link_sel":     ["h3 a", ".title a", "h2 a"],
+        "content_sel":  ["article p", ".entry-content p"],
+        "summary_sel":  [".lead"],
+        "author_sel":   [".author"],
+        "date_sel":     ["time", ".date"],
+        "image_sel":    ["article img"],
+        "rss":          "https://www.jjdin.com/feed",
+        "tier":         1,
+        "article_tier": 1,
+    },
 }
 
-ALL_MEDIA = []
-for _cat, _outlets in MEDIA_DIRECTORY.items():
-    for _o in _outlets:
-        _o["category"] = _cat
-        ALL_MEDIA.append(_o)
-
-
-# ============================================================
-# INTELLIGENCE KEYWORDS
-# ============================================================
-
-PARTY_KEYWORDS = {
-    "Awami League":       ["awami", "আওয়ামী", "sheikh hasina", "শেখ হাসিনা", "নৌকা", "হাসিনা", "মুজিব", "bangabandhu", "বঙ্গবন্ধু", "১৪ দল", "fourteen party"],
-    "BNP":                ["bnp", "বিএনপি", "khaleda", "খালেদা", "tarique", "তারেক", "জিয়া", "zia", "২০ দল", "তত্ত্বাবধায়ক", "caretaker", "নির্দলীয়"],
-    "Jamaat-e-Islami":    ["jamaat", "জামায়াত", "ইসলামী", "islami", "শিবির", "নিজামী", "nizami", "রাজাকার"],
-    "Jatiya Party":       ["jatiya party", "জাতীয় পার্টি", "ershad", "এরশাদ", "রওশন", "rowshan", "লাঙল", "জাপা"],
-    "Interim Government": ["interim", "অন্তর্বর্তী", "yunus", "ইউনুস", "chief adviser", "প্রধান উপদেষ্টা", "সংস্কার", "reform"],
+# ── Generic fallback for unconfigured domains ──────────────
+_GENERIC_CFG = {
+    "headline_sel": ["h3 a", "h2 a", ".title a", ".news-title a", ".headline a", ".card-title a", ".post-title a"],
+    "link_sel":     ["h3 a", "h2 a", ".title a", ".news-title a"],
+    "content_sel":  ["article p", ".entry-content p", ".post-content p", ".article-body p", ".content p"],
+    "summary_sel":  [".lead", ".excerpt", ".intro", ".summary"],
+    "author_sel":   [".author", ".byline", ".reporter"],
+    "date_sel":     ["time", ".date", ".published", ".post-date"],
+    "image_sel":    ["article img", ".featured-image img", ".post-thumbnail img"],
+    "rss":          None,
+    "tier":         1,
+    "article_tier": 1,
 }
 
-THREAT_KEYWORDS = [
-    "সহিংসতা", "violence", "হামলা", "attack", "গ্রেপ্তার", "arrest",
-    "নিষিদ্ধ", "ban", "ষড়যন্ত্র", "conspiracy", "বিদেশী হস্তক্ষেপ",
-    "foreign interference", "অস্থিরতা", "instability", "অবরোধ", "blockade",
-    "হরতাল", "hartal", "strike", "ধর্মঘট", "সংঘাত", "conflict",
-    "উত্তেজনা", "tension", "সংকট", "crisis", "আন্দোলন", "movement",
-    "নিহত", "killed", "আহত", "injured", "সংঘর্ষ", "clash", "বিস্ফোরণ", "explosion",
+# ── User agents ────────────────────────────────────────────
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_2_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
 ]
 
-NARRATIVE_THEMES = {
-    "Election":       ["নির্বাচন", "election", "ভোট", "vote", "ballot", "প্রার্থী", "candidate", "ইভিএম", "evm"],
-    "Economy":        ["অর্থনীতি", "economy", "মূল্যস্ফীতি", "inflation", "দ্রব্যমূল্য", "price", "taka", "টাকা", "রিজার্ভ", "reserve"],
-    "Security":       ["নিরাপত্তা", "security", "পুলিশ", "police", "র‌্যাব", "rab", "সেনা", "army", "বিজিবি", "bgb"],
-    "Corruption":     ["দুর্নীতি", "corruption", "লুটপাট", "looting", "অর্থ আত্মসাৎ", "embezzlement", "দুদক", "acc"],
-    "Foreign Policy": ["ভারত", "india", "চীন", "china", "আমেরিকা", "america", "usa", "রোহিঙ্গা", "rohingya", "মিয়ানমার", "myanmar"],
-    "Justice":        ["বিচার", "justice", "মামলা", "case", "আদালত", "court", "ট্রাইব্যুনাল", "tribunal", "রায়", "verdict"],
-    "Protest":        ["আন্দোলন", "protest", "বিক্ষোভ", "demonstration", "ধর্মঘট", "সমাবেশ", "rally", "মিছিল"],
-    "Diplomacy":      ["কূটনীতি", "diplomacy", "দূতাবাস", "embassy", "সম্পর্ক", "relation", "চুক্তি", "agreement", "সফর", "visit"],
-}
-
-PARTY_COLORS = {
-    "Awami League":       "#2563eb",
-    "BNP":                "#16a34a",
-    "Jamaat-e-Islami":    "#dc2626",
-    "Jatiya Party":       "#d97706",
-    "Interim Government": "#7c3aed",
-}
-
-CAT_LABELS = {
-    "print_newspapers_bangla":     "📰 Bangla Newspapers (8)",
-    "print_newspapers_english":    "📰 English Newspapers (4)",
-    "digital_news_portals":        "🌐 Digital Portals (4)",
-    "television_channels":         "📺 TV Channels (4)",
-    "regional_portals":            "📍 Regional BD (13)",
-    "indian_bengali_media":        "🇮🇳 Indian Bengali (6)",
-    "international_news_agencies": "🌍 International (9)",
-}
-
-TIER_CSS = {
-    "Tier1 (aiohttp)":    ("tier1", "⚡"),
-    "Tier2 (Playwright)": ("tier2", "🎭"),
-    "Tier3 (Stealth)":    ("tier3", "🥷"),
-    "Tier4 (GNews RSS)":  ("tier4", "📡"),
-    "Failed":             ("tierfail", "❌"),
-}
+def _ua() -> str:
+    return random.choice(USER_AGENTS)
 
 
 # ============================================================
-# CSS
+# HTML UTILITIES
 # ============================================================
 
-st.markdown("""
-<style>
-  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
+def _clean(text: str) -> str:
+    """Normalize whitespace and truncate."""
+    if not text:
+        return ""
+    text = re.sub(r'[\r\n\t]+', ' ', text)
+    text = re.sub(r'\s{2,}', ' ', text)
+    return text.strip()[:500]
 
-  html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+def _clean_body(text: str) -> str:
+    """Clean article body text — allow longer content."""
+    if not text:
+        return ""
+    text = re.sub(r'[\r\n\t]+', ' ', text)
+    text = re.sub(r'\s{2,}', ' ', text)
+    return text.strip()
 
-  .main-header {
-    font-size: 2.3rem; font-weight: 800;
-    background: linear-gradient(135deg, #1e3a8a 0%, #7c3aed 60%, #db2777 100%);
-    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-    text-align: center; margin-bottom: 0.2rem; letter-spacing: -0.5px;
-  }
-  .sub-header { text-align: center; color: #6b7280; margin-bottom: 1.5rem; font-size: 0.9rem; }
+def _dedupe_titles(items: list) -> list:
+    seen, out = set(), []
+    for h in items:
+        key = re.sub(r'\W+', '', h.lower())[:60]
+        if key and key not in seen and len(h) > 8:
+            seen.add(key)
+            out.append(h)
+    return out
 
-  .kpi-card {
-    background: white; border: 1px solid #e5e7eb;
-    border-radius: 12px; padding: 16px 20px; text-align: center;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
-    transition: box-shadow 0.2s;
-  }
-  .kpi-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
-  .kpi-label { font-size: 0.78rem; color: #6b7280; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
-  .kpi-value { font-size: 2rem; font-weight: 800; color: #111827; line-height: 1.1; }
-  .kpi-sub   { font-size: 0.75rem; color: #9ca3af; margin-top: 2px; }
+def _get_domain(outlet: dict) -> str:
+    site = outlet.get("website", "")
+    if not site.startswith("http"):
+        site = "https://" + site
+    return urlparse(site).netloc.lstrip("www.")
 
-  .tier-badge {
-    font-size: 0.72rem; padding: 2px 9px; border-radius: 10px;
-    font-weight: 700; display: inline-block; letter-spacing: 0.3px;
-  }
-  .tier1    { background: #d1fae5; color: #065f46; }
-  .tier2    { background: #dbeafe; color: #1e40af; }
-  .tier3    { background: #ede9fe; color: #5b21b6; }
-  .tier4    { background: #fef3c7; color: #92400e; }
-  .tierfail { background: #fee2e2; color: #991b1b; }
+def _build_url(outlet: dict) -> str:
+    site = outlet.get("website", "")
+    if not site.startswith("http"):
+        return "https://" + site
+    return site
 
-  .narrative-box {
-    border-left: 4px solid #7c3aed; padding: 12px 14px;
-    background: #f5f3ff; border-radius: 0 8px 8px 0; margin: 7px 0;
-    transition: background 0.2s;
-  }
-  .narrative-box:hover { background: #ede9fe; }
+def _abs_url(href: str, base: str) -> str:
+    """Convert relative URL to absolute."""
+    if not href:
+        return ""
+    href = href.strip()
+    if href.startswith("http"):
+        return href
+    return urljoin(base, href)
 
-  .threat-card {
-    border: 1px solid #fca5a5; background: #fff1f2;
-    border-radius: 10px; padding: 14px 16px; margin: 8px 0;
-    border-left: 5px solid #dc2626;
-  }
+def _parse_html_articles(html: str, cfg: dict, base_url: str) -> list:
+    """
+    Parse homepage HTML → list of {title, url} article stubs.
+    Returns up to 30 stubs.
+    """
+    if not HAS_BS4:
+        return []
+    soup = BeautifulSoup(html, "html.parser")
+    results = []
+    seen_urls = set()
 
-  .predict-card {
-    border: 1px solid #e5e7eb; padding: 16px 18px;
-    border-radius: 12px; margin: 8px 0;
-    background: white; box-shadow: 0 1px 3px rgba(0,0,0,0.05);
-  }
-
-  .outlet-card {
-    border: 1px solid #e5e7eb; border-radius: 10px;
-    padding: 12px 14px; margin: 6px 0;
-    background: white; transition: box-shadow 0.15s;
-  }
-  .outlet-card:hover { box-shadow: 0 3px 8px rgba(0,0,0,0.08); }
-
-  .alert-box {
-    border-radius: 10px; padding: 14px 18px; margin: 10px 0;
-    border-left: 5px solid;
-  }
-  .alert-info    { background: #eff6ff; border-color: #3b82f6; color: #1e40af; }
-  .alert-warning { background: #fffbeb; border-color: #f59e0b; color: #92400e; }
-  .alert-danger  { background: #fff1f2; border-color: #dc2626; color: #991b1b; }
-
-
-  .wp-card  { border:1px solid #d1fae5; background:#f0fdf4; border-radius:12px; padding:14px; margin:6px 0; border-left:5px solid #16a34a; }
-  .wp-error { border:1px solid #fca5a5; background:#fff1f2; border-radius:12px; padding:12px; margin:6px 0; border-left:5px solid #dc2626; }
-  /* Hide Streamlit branding */
-  #MainMenu, footer { visibility: hidden; }
-  .stDeployButton { display: none; }
-</style>
-""", unsafe_allow_html=True)
-
-
-# ============================================================
-# INTELLIGENCE ANALYSIS ENGINE
-# ============================================================
-
-def _sentiment(text: str) -> tuple:
-    if HAS_TEXTBLOB:
+    for sel in cfg.get("link_sel", []):
         try:
-            pol = TextBlob(text).sentiment.polarity
+            for el in soup.select(sel):
+                title = _clean(el.get_text())
+                href  = el.get("href", "")
+                if not href:
+                    # try parent <a>
+                    parent = el.find_parent("a")
+                    if parent:
+                        href = parent.get("href", "")
+                url = _abs_url(href, base_url)
+                if title and len(title) > 8 and url and url not in seen_urls:
+                    seen_urls.add(url)
+                    results.append({"title": title, "url": url})
+            if len(results) >= 5:
+                break
         except Exception:
-            pol = 0.0
-    else:
-        pol = 0.0
-    label = "Positive" if pol > 0.1 else ("Negative" if pol < -0.1 else "Neutral")
-    return label, round(pol, 3)
-
-
-def analyze_text(text: str) -> dict:
-    text_lower = text.lower()
-    label, polarity = _sentiment(text)
-
-    party_scores = {
-        p: sum(1 for kw in kws if kw in text_lower)
-        for p, kws in PARTY_KEYWORDS.items()
-    }
-    party_scores = {p: s for p, s in party_scores.items() if s > 0}
-
-    threat_hits = [kw for kw in THREAT_KEYWORDS if kw in text_lower]
-    threat_score = min(len(threat_hits) * 18, 100)
-    threat_level = "HIGH" if threat_score >= 60 else ("MEDIUM" if threat_score >= 30 else "LOW")
-
-    theme_scores = {
-        t: sum(1 for kw in kws if kw in text_lower)
-        for t, kws in NARRATIVE_THEMES.items()
-    }
-    theme_scores = {t: s for t, s in theme_scores.items() if s > 0}
-
-    return {
-        "sentiment":     label,
-        "polarity":      polarity,
-        "party_scores":  party_scores,
-        "dominant_party": max(party_scores, key=party_scores.get) if party_scores else None,
-        "threat_score":  threat_score,
-        "threat_level":  threat_level,
-        "threat_hits":   threat_hits,
-        "dominant_theme": max(theme_scores, key=theme_scores.get) if theme_scores else "General",
-        "theme_scores":  theme_scores,
-    }
-
-
-def analyze_outlet_results(raw: dict) -> dict:
-    headlines = raw.get("headlines", [])
-    if not headlines:
-        return {**raw,
-                "avg_polarity": 0, "sentiment_dist": {}, "party_bias": {},
-                "dominant_party": None, "threat_score": 0, "threat_level": "LOW",
-                "dominant_theme": "N/A", "narrative_themes": {}, "analyzed_headlines": []}
-
-    analyzed = [{"text": h, **analyze_text(h)} for h in headlines]
-    polarities = [a["polarity"] for a in analyzed]
-    avg_pol = round(sum(polarities) / len(polarities), 3) if polarities else 0
-
-    sentiment_dist = Counter(a["sentiment"] for a in analyzed)
-
-    party_agg = defaultdict(int)
-    theme_agg = defaultdict(int)
-    for a in analyzed:
-        for p, s in a["party_scores"].items():   party_agg[p] += s
-        for t, s in a["theme_scores"].items():   theme_agg[t] += s
-
-    avg_threat = sum(a["threat_score"] for a in analyzed) / len(analyzed) if analyzed else 0
-    threat_level = "HIGH" if avg_threat >= 50 else ("MEDIUM" if avg_threat >= 25 else "LOW")
-
-    return {
-        **raw,
-        "avg_polarity":       avg_pol,
-        "sentiment_dist":     dict(sentiment_dist),
-        "party_bias":         dict(party_agg),
-        "dominant_party":     max(party_agg, key=party_agg.get) if party_agg else None,
-        "threat_score":       round(avg_threat),
-        "threat_level":       threat_level,
-        "dominant_theme":     max(theme_agg, key=theme_agg.get) if theme_agg else "General",
-        "narrative_themes":   dict(theme_agg),
-        "analyzed_headlines": analyzed,
-    }
-
-
-# ============================================================
-# NARRATIVE ENGINE
-# ============================================================
-
-def detect_narratives(results: list) -> list:
-    all_hl = [{"text": h, "source": r["name"]}
-              for r in results for h in r.get("headlines", [])]
-
-    bigram_freq: Counter  = Counter()
-    bigram_src:  defaultdict = defaultdict(set)
-
-    for item in all_hl:
-        words = re.findall(r'[\u0980-\u09FF\w]{3,}', item["text"].lower())
-        for i in range(len(words) - 1):
-            bg = f"{words[i]} {words[i+1]}"
-            bigram_freq[bg] += 1
-            bigram_src[bg].add(item["source"])
-
-    narratives = []
-    for bg, count in bigram_freq.most_common(20):
-        if count < 2:
             continue
-        sources = list(bigram_src[bg])
-        theme = next(
-            (t for t, kws in NARRATIVE_THEMES.items() if any(kw in bg for kw in kws)),
-            "General"
-        )
-        narratives.append({
-            "phrase":      bg,
-            "count":       count,
-            "sources":     sources,
-            "source_count": len(sources),
-            "theme":       theme,
-            "coordinated": len(sources) >= 3,
-        })
 
-    return sorted(narratives, key=lambda x: (x["source_count"], x["count"]), reverse=True)[:12]
+    # Generic fallback if selectors failed
+    if not results:
+        for tag in soup.find_all(["h2", "h3"]):
+            a = tag.find("a", href=True)
+            if a:
+                title = _clean(a.get_text())
+                url   = _abs_url(a["href"], base_url)
+                if title and len(title) > 8 and url and url not in seen_urls:
+                    seen_urls.add(url)
+                    results.append({"title": title, "url": url})
+
+    return results[:30]
 
 
-# ============================================================
-# THREAT ENGINE
-# ============================================================
+def _extract_article_content(html: str, cfg: dict, article_url: str) -> dict:
+    """
+    From a full article HTML page, extract body text + metadata.
+    Returns dict with full_text, summary, author, published_at, image_url, tags.
+    """
+    if not HAS_BS4:
+        return {}
+    soup = BeautifulSoup(html, "html.parser")
 
-def detect_threats(results: list) -> list:
-    threats = []
+    # ── Full body text ──
+    full_text = ""
+    for sel in cfg.get("content_sel", []):
+        try:
+            paras = soup.select(sel)
+            if paras:
+                full_text = " ".join(_clean(p.get_text()) for p in paras if _clean(p.get_text()))
+                if len(full_text) > 100:
+                    break
+        except Exception:
+            continue
 
-    high = [r for r in results if r.get("threat_level") == "HIGH"]
-    if len(high) >= 3:
-        threats.append({
-            "type":    "Coordinated Threat Coverage",
-            "level":   "HIGH",
-            "detail":  f"{len(high)} outlets simultaneously publishing high-threat content",
-            "outlets": [r["name"] for r in high],
-        })
+    # If structured selectors fail, grab all <p> inside <article>
+    if len(full_text) < 80:
+        art = soup.find("article")
+        if art:
+            paras = art.find_all("p")
+            full_text = " ".join(_clean(p.get_text()) for p in paras if len(_clean(p.get_text())) > 15)
 
-    party_neg: defaultdict = defaultdict(list)
-    for r in results:
-        if r.get("avg_polarity", 0) < -0.15 and r.get("dominant_party"):
-            party_neg[r["dominant_party"]].append(r["name"])
-    for party, outlets in party_neg.items():
-        if len(outlets) >= 3:
-            threats.append({
-                "type":    "Coordinated Negative Campaign",
-                "level":   "HIGH",
-                "detail":  f"{len(outlets)} outlets with sustained negative framing targeting {party}",
-                "outlets": outlets,
-            })
+    # ── Summary / lead ──
+    summary = ""
+    for sel in cfg.get("summary_sel", []):
+        try:
+            el = soup.select_one(sel)
+            if el:
+                summary = _clean(el.get_text())
+                if len(summary) > 20:
+                    break
+        except Exception:
+            continue
 
-    # Surge detection: theme suddenly dominant
-    theme_counter: Counter = Counter()
-    for r in results:
-        for t, c in r.get("narrative_themes", {}).items():
-            theme_counter[t] += c
-    for theme, cnt in theme_counter.most_common(3):
-        if cnt >= 15:
-            threats.append({
-                "type":    f"Narrative Surge — {theme}",
-                "level":   "MEDIUM",
-                "detail":  f"'{theme}' theme appears {cnt} times across media — potential agenda push",
-                "outlets": [],
-            })
+    # If no summary, use first ~250 chars of full_text
+    if not summary and full_text:
+        summary = full_text[:250].rsplit(" ", 1)[0] + "…"
 
-    return threats
+    # ── Author ──
+    author = ""
+    for sel in cfg.get("author_sel", []):
+        try:
+            el = soup.select_one(sel)
+            if el:
+                author = _clean(el.get_text())
+                if author and len(author) > 1:
+                    break
+        except Exception:
+            continue
 
+    # ── Published date ──
+    published_at = ""
+    for sel in cfg.get("date_sel", []):
+        try:
+            el = soup.select_one(sel)
+            if el:
+                published_at = (
+                    el.get("datetime", "")
+                    or el.get("content", "")
+                    or _clean(el.get_text())
+                )
+                if published_at:
+                    break
+        except Exception:
+            continue
 
-# ============================================================
-# PREDICTION ENGINE
-# ============================================================
+    # Try JSON-LD structured data as fallback
+    if not published_at:
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(script.string or "")
+                if isinstance(data, list):
+                    data = data[0]
+                published_at = (
+                    data.get("datePublished", "")
+                    or data.get("dateModified", "")
+                )
+                if not author:
+                    auth = data.get("author", {})
+                    if isinstance(auth, dict):
+                        author = auth.get("name", "")
+                    elif isinstance(auth, list) and auth:
+                        author = auth[0].get("name", "")
+                if published_at:
+                    break
+            except Exception:
+                continue
 
-PREDICTIONS = {
-    "Election":       "নির্বাচনী উত্তেজনা আগামী ২–৪ সপ্তাহে বাড়তে পারে। দলীয় সমাবেশ ও পাল্টাপাল্টি বিবৃতি আসার সম্ভাবনা।",
-    "Economy":        "দ্রব্যমূল্য ও অর্থনৈতিক চাপ রাজনৈতিক হাতিয়ার হিসেবে ব্যবহার হওয়ার আশঙ্কা।",
-    "Security":       "আইন-শৃঙ্খলা পরিস্থিতি বিরোধীদের আন্দোলনের ট্রিগার হতে পারে।",
-    "Corruption":     "দুর্নীতির ন্যারেটিভ আসন্ন রাজনৈতিক বিতর্কে প্রাধান্য পাবে।",
-    "Foreign Policy": "বৈদেশিক সম্পর্কের ইস্যু অভ্যন্তরীণ রাজনীতিতে প্রভাব ফেলতে পারে।",
-    "Justice":        "বিচারিক উন্নয়ন পরবর্তী রাজনৈতিক সংবাদ চক্রে আধিপত্য বিস্তার করবে।",
-    "Protest":        "বিক্ষোভ ও আন্দোলনের মাত্রা বৃদ্ধি পাওয়ার সম্ভাবনা আছে।",
-    "Diplomacy":      "কূটনৈতিক গতিবিধি অভ্যন্তরীণ রাজনীতিতে নতুন মাত্রা যোগ করতে পারে।",
-}
+    # ── Lead image ──
+    image_url = ""
+    for sel in cfg.get("image_sel", []):
+        try:
+            el = soup.select_one(sel)
+            if el:
+                image_url = el.get("src", "") or el.get("data-src", "") or el.get("data-lazy-src", "")
+                if image_url:
+                    image_url = _abs_url(image_url, article_url)
+                    break
+        except Exception:
+            continue
 
-def predict_issues(results: list) -> list:
-    theme_counts: Counter = Counter()
-    for r in results:
-        for t, c in r.get("narrative_themes", {}).items():
-            theme_counts[t] += c
-
-    return [
-        {
-            "theme":      t,
-            "intensity":  min(c * 6, 100),
-            "prediction": PREDICTIONS.get(t, f"{t} ইস্যু রাজনৈতিক আলোচনায় আসতে পারে।"),
-            "count":      c,
-        }
-        for t, c in theme_counts.most_common(8)
-    ]
-
-
-# ============================================================
-# HELPER WIDGETS
-# ============================================================
-
-def _tier_badge(tier: str) -> str:
-    css, icon = TIER_CSS.get(tier, ("tierfail", "❓"))
-    return f'<span class="tier-badge {css}">{icon} {tier}</span>'
-
-def _kpi(label: str, value, sub: str = "") -> str:
-    return f"""
-    <div class="kpi-card">
-        <div class="kpi-label">{label}</div>
-        <div class="kpi-value">{value}</div>
-        <div class="kpi-sub">{sub}</div>
-    </div>"""
-
-def _threat_icon(level: str) -> str:
-    return {"HIGH": "🔴", "MEDIUM": "🟡", "LOW": "🟢"}.get(level, "⚪")
-
-
-# ============================================================
-# MAIN APP
-# ============================================================
-
-
-# ============================================================
-# WORDPRESS API ENGINE
-# ============================================================
-
-def wp_test_connection(url, user, password):
+    # ── Tags / keywords ──
+    tags = []
     try:
-        r = requests.get(url.rstrip("/") + "/wp-json/wp/v2/users/me",
-                         auth=(user, password), timeout=10)
-        if r.status_code == 200:
-            d = r.json()
-            return {"ok": True, "name": d.get("name","?"), "roles": d.get("roles",[])}
-        return {"ok": False, "error": "HTTP " + str(r.status_code)}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-
-def wp_get_categories(url, user, password):
-    try:
-        r = requests.get(url.rstrip("/")+"/wp-json/wp/v2/categories?per_page=50",
-                         auth=(user, password), timeout=10)
-        if r.status_code == 200:
-            return [{"id": c["id"], "name": c["name"]} for c in r.json()]
+        meta_kw = soup.find("meta", attrs={"name": "keywords"})
+        if meta_kw:
+            tags = [t.strip() for t in meta_kw.get("content", "").split(",") if t.strip()][:8]
     except Exception:
         pass
+
+    return {
+        "full_text":    _clean_body(full_text)[:8000],
+        "summary":      summary[:500],
+        "author":       author[:100],
+        "published_at": published_at[:50],
+        "image_url":    image_url[:500],
+        "tags":         tags,
+        "word_count":   len(full_text.split()) if full_text else 0,
+    }
+
+
+# ============================================================
+# TIER 1: aiohttp (headlines + articles)
+# ============================================================
+
+async def _fetch_html_aiohttp(url: str, session) -> Optional[str]:
+    headers = {
+        "User-Agent": _ua(),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9,bn;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+    }
+    try:
+        async with session.get(
+            url, headers=headers,
+            timeout=aiohttp.ClientTimeout(total=18),
+            allow_redirects=True, ssl=False
+        ) as resp:
+            if resp.status == 200:
+                return await resp.text(errors="replace")
+    except Exception as e:
+        logger.debug(f"aiohttp {url}: {e}")
+    return None
+
+
+# ============================================================
+# TIER 2: Playwright (standard)
+# ============================================================
+
+async def _fetch_html_playwright(url: str, browser) -> Optional[str]:
+    if not browser:
+        return None
+    page = None
+    try:
+        page = await browser.new_page(
+            user_agent=_ua(),
+            viewport={"width": 1366, "height": 768},
+            extra_http_headers={"Accept-Language": "en-US,en;q=0.9,bn;q=0.8"},
+        )
+        await page.goto(url, timeout=28000, wait_until="domcontentloaded")
+        await asyncio.sleep(1.8)
+        return await page.content()
+    except Exception as e:
+        logger.debug(f"Playwright {url}: {e}")
+        return None
+    finally:
+        if page:
+            try:
+                await page.close()
+            except Exception:
+                pass
+
+
+# ============================================================
+# TIER 3: Playwright stealth
+# ============================================================
+
+async def _fetch_html_stealth(url: str, browser) -> Optional[str]:
+    if not browser:
+        return None
+    context = None
+    try:
+        context = await browser.new_context(
+            user_agent=_ua(),
+            viewport={"width": 1920, "height": 1080},
+            locale="en-US",
+            timezone_id="Asia/Dhaka",
+            extra_http_headers={
+                "Accept-Language": "en-US,en;q=0.9,bn;q=0.8",
+                "sec-ch-ua": '"Not A(Brand";v="99", "Google Chrome";v="121"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Windows"',
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+            }
+        )
+        await context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver',  { get: () => undefined });
+            Object.defineProperty(navigator, 'plugins',    { get: () => [1, 2, 3, 4, 5] });
+            Object.defineProperty(navigator, 'languages',  { get: () => ['en-US', 'en', 'bn'] });
+            Object.defineProperty(navigator, 'platform',   { get: () => 'Win32' });
+            window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){} };
+            Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+            Object.defineProperty(screen, 'colorDepth',    { get: () => 24 });
+        """)
+        page = await context.new_page()
+        await page.goto(url, timeout=32000, wait_until="domcontentloaded")
+        await page.evaluate("window.scrollTo(0, Math.random() * 800 + 100)")
+        await asyncio.sleep(random.uniform(1.5, 3.0))
+        html = await page.content()
+        return html
+    except Exception as e:
+        logger.debug(f"Stealth {url}: {e}")
+        return None
+    finally:
+        if context:
+            try:
+                await context.close()
+            except Exception:
+                pass
+
+
+async def _fetch_html(url: str, tier: int, session, browser) -> Optional[str]:
+    """Fetch HTML using appropriate tier."""
+    if tier == 1:
+        return await _fetch_html_aiohttp(url, session)
+    elif tier == 2:
+        html = await _fetch_html_playwright(url, browser)
+        if not html:
+            html = await _fetch_html_aiohttp(url, session)
+        return html
+    elif tier == 3:
+        html = await _fetch_html_stealth(url, browser)
+        if not html:
+            html = await _fetch_html_playwright(url, browser)
+        if not html:
+            html = await _fetch_html_aiohttp(url, session)
+        return html
+    return None
+
+
+# ============================================================
+# TIER 4: Google News RSS
+# ============================================================
+
+async def _gnews_rss(domain: str, session) -> list:
+    if not HAS_AIOHTTP:
+        return []
+    url = f"https://news.google.com/rss/search?q=site:{domain}&hl=en&gl=BD&ceid=BD:en"
+    try:
+        async with session.get(
+            url, headers={"User-Agent": _ua()},
+            timeout=aiohttp.ClientTimeout(total=12), ssl=False
+        ) as resp:
+            if resp.status == 200:
+                return _parse_rss_to_stubs(await resp.text(errors="replace"))
+    except Exception as e:
+        logger.debug(f"GNews {domain}: {e}")
     return []
 
 
-def wp_post_article(url, user, password, title, content,
-                    status="draft", category_ids=None, tags=None):
-    endpoint = url.rstrip("/") + "/wp-json/wp/v2/posts"
-    payload  = {"title": title, "content": content, "status": status, "format": "standard"}
-    if category_ids:
-        payload["categories"] = category_ids
-    if tags:
-        tag_ids = []
-        for tag in tags[:5]:
-            try:
-                te = url.rstrip("/")+"/wp-json/wp/v2/tags?search="+str(tag)
-                tr = requests.get(te, auth=(user, password), timeout=8)
-                existing = tr.json() if tr.status_code == 200 else []
-                if existing:
-                    tag_ids.append(existing[0]["id"])
-                else:
-                    tc_r = requests.post(url.rstrip("/")+"/wp-json/wp/v2/tags",
-                                         json={"name": tag}, auth=(user, password), timeout=8)
-                    if tc_r.status_code in (200, 201):
-                        tag_ids.append(tc_r.json()["id"])
-            except Exception:
-                continue
-        if tag_ids:
-            payload["tags"] = tag_ids
+# ============================================================
+# TIER 5: Direct RSS
+# ============================================================
+
+async def _direct_rss(rss_url: str, session) -> list:
+    if not rss_url or not HAS_AIOHTTP:
+        return []
     try:
-        r = requests.post(endpoint, json=payload, auth=(user, password), timeout=15)
-        if r.status_code in (200, 201):
-            d = r.json()
-            return {"ok": True, "id": d.get("id"), "link": d.get("link", "")}
-        return {"ok": False, "error": "HTTP " + str(r.status_code) + ": " + r.text[:120]}
+        async with session.get(
+            rss_url, headers={"User-Agent": _ua()},
+            timeout=aiohttp.ClientTimeout(total=12), ssl=False
+        ) as resp:
+            if resp.status == 200:
+                return _parse_rss_to_stubs(await resp.text(errors="replace"))
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        logger.debug(f"RSS {rss_url}: {e}")
+    return []
 
 
-def build_wp_summary_post(results, scan_time):
-    successful  = [r for r in results if r.get("status") == "success"]
-    total_hl    = sum(r.get("count", 0) for r in successful)
-    high_threat = sum(1 for r in successful if r.get("threat_level") == "HIGH")
-    date_str    = datetime.now().strftime("%d %B %Y")
-    tc = Counter()
-    for r in successful:
-        for t, c in r.get("narrative_themes", {}).items():
-            tc[t] += c
-    top_themes = [t for t, _ in tc.most_common(3)]
-    pa = Counter()
-    for r in successful:
-        for p, s in r.get("party_bias", {}).items():
-            pa[p] += s
-    top_party = pa.most_common(1)[0][0] if pa else "N/A"
-    title = "রাজনৈতিক মিডিয়া বিশ্লেষণ — " + date_str
-    rows_html = ""
-    for r in successful[:20]:
-        threat_c = {"HIGH": "#dc2626", "MEDIUM": "#d97706", "LOW": "#16a34a"}.get(
-            r.get("threat_level", "LOW"), "#16a34a")
-        party = r.get("dominant_party") or "—"
-        pc    = PARTY_COLORS.get(party, "#6b7280")
-        items = "".join(
-            "<li style=\'margin-bottom:4px;font-size:0.92em;\'>" + hl + "</li>"
-            for hl in r.get("headlines", [])[:8]
-        )
-        extra = len(r.get("headlines", [])) - 8
-        if extra > 0:
-            items += "<li style=\'color:#9ca3af;\'>... আরো " + str(extra) + "টি</li>"
-        rows_html += (
-            "<div style=\'border:1px solid #e2e8f0;border-radius:8px;padding:14px;margin:10px 0;"
-            "border-left:4px solid " + pc + ";\'>\n"
-            "<strong>" + r["name"] + "</strong> "
-            "<span style=\'background:" + pc + ";color:white;padding:2px 8px;border-radius:10px;"
-            "font-size:0.78em;\'>" + party + "</span>"
-            "<span style=\'background:" + threat_c + ";color:white;padding:2px 8px;border-radius:10px;"
-            "font-size:0.78em;margin-left:4px;\'>⚠️ " + r.get("threat_level", "LOW") + "</span>"
-            "<br/><ul style=\'margin:8px 0;padding-left:18px;\'>" + items + "</ul></div>\n"
-        )
-    html = (
-        "<div style=\'background:#f8fafc;border-left:5px solid #7c3aed;padding:16px;"
-        "border-radius:0 10px 10px 0;margin-bottom:20px;\'>"
-        "<h2 style=\'color:#1e3a8a;margin:0 0 8px;\'>Political Media Intelligence Report</h2>"
-        "<p style=\'color:#6b7280;margin:0;font-size:0.9em;\'>" + scan_time + "</p></div>"
-        "<h3>স্ক্যান সারসংক্ষেপ</h3>"
-        "<table style=\'width:100%;border-collapse:collapse;margin-bottom:20px;\'>"
-        "<tr style=\'background:#f1f5f9;\'>"
-        "<td style=\'padding:10px;border:1px solid #e2e8f0;font-weight:600;\'>সফল আউটলেট</td>"
-        "<td style=\'padding:10px;border:1px solid #e2e8f0;\'>" + str(len(successful)) + " টি</td>"
-        "<td style=\'padding:10px;border:1px solid #e2e8f0;font-weight:600;\'>মোট শিরোনাম</td>"
-        "<td style=\'padding:10px;border:1px solid #e2e8f0;\'>" + str(total_hl) + " টি</td></tr>"
-        "<tr>"
-        "<td style=\'padding:10px;border:1px solid #e2e8f0;font-weight:600;\'>High Threat</td>"
-        "<td style=\'padding:10px;border:1px solid #e2e8f0;color:#dc2626;font-weight:700;\'>" + str(high_threat) + " টি</td>"
-        "<td style=\'padding:10px;border:1px solid #e2e8f0;font-weight:600;\'>শীর্ষ দল</td>"
-        "<td style=\'padding:10px;border:1px solid #e2e8f0;\'>" + top_party + "</td></tr>"
-        "<tr style=\'background:#f1f5f9;\'>"
-        "<td style=\'padding:10px;border:1px solid #e2e8f0;font-weight:600;\'>প্রধান থিম</td>"
-        "<td colspan=\'3\' style=\'padding:10px;border:1px solid #e2e8f0;\'>" + " · ".join(top_themes) + "</td>"
-        "</tr></table>"
-        "<h3>আউটলেট ভিত্তিক শিরোনাম</h3>" + rows_html +
-        "<hr style=\'border:none;border-top:2px solid #e2e8f0;margin:24px 0;\'>"
-        "<p style=\'color:#9ca3af;font-size:0.82em;text-align:center;\'>"
-        "Auto-generated · Political Media Intelligence System · " + scan_time + "</p>"
-    )
-    return title, html
-
-
-def build_per_outlet_posts(results):
-    posts = []
-    for r in [x for x in results if x.get("status") == "success" and x.get("headlines")]:
-        party   = r.get("dominant_party") or "General"
-        theme   = r.get("dominant_theme", "General")
-        threat  = r.get("threat_level", "LOW")
-        pc      = PARTY_COLORS.get(party, "#6b7280")
-        tc_color = {"HIGH": "#dc2626", "MEDIUM": "#d97706", "LOW": "#16a34a"}.get(threat, "#16a34a")
-        date_s  = datetime.now().strftime("%d %B %Y")
-        title   = r["name"] + " — " + date_s + " শিরোনাম বিশ্লেষণ"
-        items   = "".join("<li style=\'margin-bottom:6px;\'>" + hl + "</li>" for hl in r.get("headlines", []))
-        content = (
-            "<div style=\'background:#f8fafc;border-left:4px solid " + pc + ";padding:14px;"
-            "border-radius:0 8px 8px 0;margin-bottom:16px;\'>"
-            "<strong>" + r["name"] + "</strong> | " + r.get("category","").replace("_"," ").title() + "<br/>"
-            "<small style=\'color:#6b7280;\'>Key Person: " + r.get("key_person","—") + " | Tier: " + r.get("tier","—") + "</small></div>"
-            "<table style=\'width:100%;border-collapse:collapse;margin-bottom:16px;\'>"
-            "<tr style=\'background:#f1f5f9;\'>"
-            "<td style=\'padding:8px;border:1px solid #e2e8f0;\'><b>Party</b></td>"
-            "<td style=\'padding:8px;border:1px solid #e2e8f0;\'>" + party + "</td>"
-            "<td style=\'padding:8px;border:1px solid #e2e8f0;\'><b>Theme</b></td>"
-            "<td style=\'padding:8px;border:1px solid #e2e8f0;\'>" + theme + "</td></tr>"
-            "<tr>"
-            "<td style=\'padding:8px;border:1px solid #e2e8f0;\'><b>Threat</b></td>"
-            "<td style=\'padding:8px;border:1px solid #e2e8f0;color:" + tc_color + ";font-weight:700;\'>" + threat + "</td>"
-            "<td style=\'padding:8px;border:1px solid #e2e8f0;\'><b>Headlines</b></td>"
-            "<td style=\'padding:8px;border:1px solid #e2e8f0;\'>" + str(r.get("count",0)) + "</td></tr>"
-            "</table><h3>শিরোনাম সমূহ</h3><ul>" + items + "</ul>"
-        )
-        tags = [r.get("category","media"), party.lower().replace(" ","-"), theme.lower(), "bangladesh", "politics"]
-        posts.append({"outlet_name": r["name"], "title": title, "content": content,
-                      "tags": [t for t in tags if t and t != "—"]})
-    return posts
-
-
-def main():
-    # Header
-    st.markdown('<h1 class="main-header">🧠 Political Media Intelligence System</h1>', unsafe_allow_html=True)
-    st.markdown(
-        '<p class="sub-header">'
-        'Real-time Bangladesh · India · International Media Monitor · '
-        'Playwright + aiohttp + GNews Engine · '
-        'Bias · Narrative · Threat · Prediction'
-        '</p>',
-        unsafe_allow_html=True,
-    )
-
-    if not _pw_ok:
-        st.warning("⚠️ Playwright browser could not be auto-installed. Tier1 + GNews RSS will still work.")
-
-    # ── SIDEBAR ──────────────────────────────────────────────
-    with st.sidebar:
-        st.markdown("### 🎛️ Control Panel")
-
-        selected_cats = st.multiselect(
-            "📂 Media Categories",
-            options=list(MEDIA_DIRECTORY.keys()),
-            default=["print_newspapers_bangla", "print_newspapers_english",
-                     "digital_news_portals", "television_channels"],
-            format_func=lambda x: CAT_LABELS.get(x, x),
-        )
-
-        selected_outlets = [o for cat in selected_cats for o in MEDIA_DIRECTORY.get(cat, [])]
-        st.caption(f"**{len(selected_outlets)} outlets selected**")
-
-        concurrency = st.slider("⚡ Parallel Scrapers", 2, 12, 6,
-                                help="Higher = faster but more memory. 6 is recommended for HF Spaces.")
-
-        est_low  = len(selected_outlets) * 3  // max(concurrency, 1)
-        est_high = len(selected_outlets) * 7  // max(concurrency, 1)
-        st.caption(f"⏱️ Estimated: {est_low}–{est_high}s")
-
-        st.markdown("---")
-        threat_filter = st.selectbox("⚠️ Threat Filter", ["All", "HIGH", "MEDIUM", "LOW"])
-        party_filter  = st.selectbox("🎯 Party Filter",  ["All"] + list(PARTY_KEYWORDS.keys()))
-
-        st.markdown("---")
-        st.markdown("**🔧 Scraper Tiers**")
-        for tier, (css, icon) in TIER_CSS.items():
-            if tier != "Failed":
-                st.markdown(f'<span class="tier-badge {css}">{icon} {tier}</span><br/>', unsafe_allow_html=True)
-
-        st.markdown("---")
-        run_scan = st.button("🚀 Run Full Intelligence Scan",
-                             type="primary", use_container_width=True,
-                             disabled=len(selected_outlets) == 0)
-        if len(selected_outlets) == 0:
-            st.warning("Please select at least one category.")
-
-    # ── TABS ─────────────────────────────────────────────────
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
-        "📊 Overview",
-        "⚖️ Bias & Alignment",
-        "📢 Narratives",
-        "⚠️ Threats",
-        "🔮 Prediction",
-        "🔍 Search",
-        "🌐 WordPress",
-        "🔬 Raw Data",
-    ])
-
-    # ── SCAN ─────────────────────────────────────────────────
-    if run_scan and selected_outlets:
-        progress = st.progress(0, "🚀 Initializing scraper engine...")
-        status_placeholder = st.empty()
-        start_ts = time.time()
-
-        with st.spinner(f"Scanning {len(selected_outlets)} outlets with {concurrency} parallel workers..."):
-            progress.progress(0.1, "⚡ Launching scrapers...")
-            raw_results = run_scraper(selected_outlets, concurrency=concurrency)
-
-            progress.progress(0.75, "🧠 Running intelligence analysis...")
-            results = [analyze_outlet_results(r) for r in raw_results]
-
-            progress.progress(1.0, "✅ Done!")
-            progress.empty()
-
-        elapsed = round(time.time() - start_ts, 1)
-        st.session_state["results"]   = results
-        st.session_state["scan_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        success_n = sum(1 for r in results if r["status"] == "success")
-        total_hl  = sum(r["count"] for r in results if r["status"] == "success")
-        st.success(
-            f"✅ **Scan complete** in **{elapsed}s** — "
-            f"{success_n}/{len(results)} outlets · **{total_hl}** headlines scraped"
-        )
-
-        # Tier breakdown
-        tier_counts = Counter(r.get("tier", "Failed") for r in results)
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("⚡ Tier1 (aiohttp)",    tier_counts.get("Tier1 (aiohttp)", 0))
-        c2.metric("🎭 Tier2 (Playwright)", tier_counts.get("Tier2 (Playwright)", 0))
-        c3.metric("🥷 Tier3 (Stealth)",    tier_counts.get("Tier3 (Stealth)", 0))
-        c4.metric("📡 Tier4 (GNews)",      tier_counts.get("Tier4 (GNews RSS)", 0))
-        c5.metric("❌ Failed",              tier_counts.get("Failed", 0))
-
-    # ── Load state ───────────────────────────────────────────
-    results    = st.session_state.get("results", [])
-    scan_time  = st.session_state.get("scan_time", "—")
-
-    if not results:
-        st.info("👆 Select categories in the sidebar and click **Run Full Intelligence Scan** to begin.")
-        return
-
-    successful = [r for r in results if r["status"] == "success"]
-    failed     = [r for r in results if r["status"] == "failed"]
-
-    # Apply sidebar filters
-    filtered = successful[:]
-    if party_filter != "All":
-        filtered = [r for r in filtered if r.get("dominant_party") == party_filter]
-    if threat_filter != "All":
-        filtered = [r for r in filtered if r.get("threat_level") == threat_filter]
-
-    # ── TAB 1: OVERVIEW ──────────────────────────────────────
-    with tab1:
-        # KPIs
-        high_threat_n = sum(1 for r in successful if r.get("threat_level") == "HIGH")
-        coord_n = sum(1 for n in detect_narratives(successful) if n["coordinated"])
-        total_hl_n = sum(r["count"] for r in successful)
-        avg_sent = round(
-            sum(r.get("avg_polarity", 0) for r in successful) / max(len(successful), 1), 3
-        ) if successful else 0
-
-        cols = st.columns(6)
-        kpi_data = [
-            ("📡 Outlets Scanned",  len(results),     f"{len(successful)} success"),
-            ("📰 Headlines",        total_hl_n,        f"Avg {total_hl_n//max(len(successful),1)}/outlet"),
-            ("🚨 High Threat",      high_threat_n,     "outlets"),
-            ("🔴 Coordinated",      coord_n,           "narratives"),
-            ("💬 Avg Sentiment",    f"{avg_sent:+.3f}", "polarity"),
-            ("⏰ Last Scan",         scan_time[-8:],    scan_time[:10]),
-        ]
-        for col, (label, val, sub) in zip(cols, kpi_data):
-            col.markdown(_kpi(label, val, sub), unsafe_allow_html=True)
-
-        st.markdown("---")
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.subheader("🌡️ Sentiment Distribution")
-            rows = []
-            for r in filtered:
-                dist  = r.get("sentiment_dist", {})
-                total = sum(dist.values()) or 1
-                rows.append({
-                    "Outlet":      r["name"],
-                    "Positive %":  round(dist.get("Positive", 0) / total * 100, 1),
-                    "Neutral %":   round(dist.get("Neutral",  0) / total * 100, 1),
-                    "Negative %":  round(dist.get("Negative", 0) / total * 100, 1),
-                })
-            if rows:
-                df = pd.DataFrame(rows)
-                fig = px.bar(
-                    df.melt(id_vars="Outlet", var_name="Sentiment", value_name="Percent"),
-                    x="Percent", y="Outlet", color="Sentiment", orientation="h",
-                    color_discrete_map={
-                        "Positive %": "#16a34a",
-                        "Neutral %":  "#6b7280",
-                        "Negative %": "#dc2626",
-                    },
-                    template="plotly_white",
+def _parse_rss_to_stubs(content: str) -> list:
+    """Parse RSS/Atom XML into list of {title, url, summary, published_at}."""
+    stubs = []
+    if HAS_FEEDPARSER:
+        try:
+            feed = feedparser.parse(content)
+            for entry in feed.entries[:30]:
+                title = _clean(entry.get("title", ""))
+                url   = entry.get("link", "")
+                summ  = _clean(
+                    BeautifulSoup(entry.get("summary", ""), "html.parser").get_text()
+                    if HAS_BS4 else entry.get("summary", "")
                 )
-                fig.update_layout(barmode="stack", height=max(320, len(rows) * 28),
-                                  margin=dict(l=10, r=10, t=30, b=10))
-                st.plotly_chart(fig, use_container_width=True)
+                pub   = entry.get("published", "") or entry.get("updated", "")
+                if title and len(title) > 8:
+                    stubs.append({
+                        "title":        title,
+                        "url":          url,
+                        "summary":      summ[:400],
+                        "published_at": pub,
+                        "full_text":    summ,
+                        "author":       "",
+                        "image_url":    "",
+                        "tags":         [],
+                        "word_count":   len(summ.split()),
+                        "scraped_at":   datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "source":       "rss",
+                    })
+            if stubs:
+                return stubs
+        except Exception:
+            pass
 
-        with col2:
-            st.subheader("🎨 Narrative Theme Distribution")
-            theme_agg: Counter = Counter()
-            for r in filtered:
-                for t, c in r.get("narrative_themes", {}).items():
-                    theme_agg[t] += c
-            if theme_agg:
-                df_t = pd.DataFrame(theme_agg.items(), columns=["Theme", "Mentions"])
-                fig2 = px.pie(df_t, values="Mentions", names="Theme",
-                              color_discrete_sequence=px.colors.qualitative.Bold,
-                              template="plotly_white")
-                fig2.update_traces(textposition="inside", textinfo="percent+label")
-                st.plotly_chart(fig2, use_container_width=True)
+    # Regex fallback
+    title_re = re.compile(r'<title[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>', re.DOTALL)
+    link_re  = re.compile(r'<link[^>]*>([^<]+)</link>|<link[^>]+href=["\']([^"\']+)["\']', re.DOTALL)
+    desc_re  = re.compile(r'<description[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</description>', re.DOTALL)
 
-        st.subheader("📋 Outlet Summary Table")
-        tbl = []
-        for r in filtered:
-            tbl.append({
-                "Media":          r["name"],
-                "Category":       r["category"].replace("_", " ").title(),
-                "Headlines":      r["count"],
-                "Avg Sentiment":  round(r.get("avg_polarity", 0), 3),
-                "Dominant Party": r.get("dominant_party") or "—",
-                "Main Theme":     r.get("dominant_theme", "—"),
-                "Threat Level":   r.get("threat_level", "—"),
-                "Scraper Tier":   r.get("tier", "—"),
-                "Time (s)":       r.get("elapsed_sec", "—"),
+    titles = title_re.findall(content)[1:]  # skip feed title
+    links  = [m[0] or m[1] for m in link_re.findall(content)]
+    descs  = desc_re.findall(content)[1:]
+
+    for i, raw_title in enumerate(titles[:30]):
+        title = _clean(re.sub(r'<[^>]+>', '', raw_title))
+        url   = links[i + 1] if i + 1 < len(links) else ""
+        summ  = _clean(re.sub(r'<[^>]+>', '', descs[i])) if i < len(descs) else ""
+        if title and len(title) > 8:
+            stubs.append({
+                "title":        title,
+                "url":          url.strip(),
+                "summary":      summ[:400],
+                "published_at": "",
+                "full_text":    summ,
+                "author":       "",
+                "image_url":    "",
+                "tags":         [],
+                "word_count":   len(summ.split()),
+                "scraped_at":   datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "source":       "rss",
             })
-        if tbl:
-            df_tbl = pd.DataFrame(tbl)
-            st.dataframe(
-                df_tbl.style
-                .applymap(
-                    lambda v: "background:#fee2e2;font-weight:bold" if v == "HIGH"
-                    else ("background:#fef3c7" if v == "MEDIUM" else ""),
-                    subset=["Threat Level"]
-                )
-                .background_gradient(subset=["Avg Sentiment"], cmap="RdYlGn", vmin=-1, vmax=1),
-                use_container_width=True, height=400,
-            )
+    return stubs
 
-        if failed:
-            with st.expander(f"❌ {len(failed)} failed outlets — click to expand"):
-                for r in failed:
-                    err = r.get("error") or "Unknown error"
-                    st.write(f"• **{r['name']}** (`{r['website']}`) — {err[:80]}")
 
-    # ── TAB 2: BIAS & ALIGNMENT ───────────────────────────────
-    with tab2:
-        st.subheader("⚖️ Media Bias & Party Alignment")
+# ============================================================
+# ARTICLE FETCHER — fetch individual article content
+# ============================================================
 
-        matrix: defaultdict = defaultdict(lambda: defaultdict(int))
-        for r in successful:
-            for p, s in r.get("party_bias", {}).items():
-                matrix[r["name"]][p] += s
+async def _fetch_article(stub: dict, cfg: dict, session, browser, art_tier: int) -> dict:
+    """
+    Given a {title, url} stub, fetch and parse the full article.
+    Returns enriched article dict.
+    """
+    url = stub.get("url", "")
+    if not url or not url.startswith("http"):
+        return {**_empty_article(url, stub.get("title", "")), **stub}
 
-        if matrix:
-            mdf = pd.DataFrame(matrix).T.fillna(0)
-            if not mdf.empty:
-                fig_h = px.imshow(
-                    mdf, title="Media × Party Coverage Heatmap",
-                    color_continuous_scale="Blues", aspect="auto",
-                    labels=dict(color="Mentions"), template="plotly_white",
-                )
-                fig_h.update_layout(height=max(420, len(mdf) * 30))
-                st.plotly_chart(fig_h, use_container_width=True)
+    html = await _fetch_html(url, art_tier, session, browser)
+    if not html:
+        return {**_empty_article(url, stub.get("title", "")), **stub}
 
-        st.subheader("🎯 Party Alignment Cards")
-        cols = st.columns(3)
-        for i, r in enumerate(successful):
-            party  = r.get("dominant_party") or "—"
-            color  = PARTY_COLORS.get(party, "#6b7280")
-            pol    = r.get("avg_polarity", 0)
-            icon   = "😊" if pol > 0.1 else ("😠" if pol < -0.1 else "😐")
-            tl     = r.get("threat_level", "LOW")
-            ti     = _threat_icon(tl)
-            tier   = r.get("tier", "—")
-            tc, ti2 = TIER_CSS.get(tier, ("tierfail", "❓"))
-            with cols[i % 3]:
-                st.markdown(f"""
-                <div class="outlet-card" style="border-left:5px solid {color};">
-                    <b>{r['name']}</b>
-                    &nbsp;<span style="font-size:0.78rem;color:#9ca3af;">{r['category'].replace('_',' ')}</span><br/>
-                    <span style="color:{color}; font-size:0.87rem; font-weight:600;">▶ {party}</span><br/>
-                    <span style="font-size:0.8rem; color:#6b7280;">
-                        {icon} {pol:+.2f} &nbsp;|&nbsp; {ti} {tl}
-                        &nbsp;|&nbsp; 📰 {r['count']} hl
-                    </span><br/>
-                    <span class="tier-badge {tc}" style="font-size:0.68rem;">{ti2} {tier}</span>
-                </div>
-                """, unsafe_allow_html=True)
+    extracted = _extract_article_content(html, cfg, url)
+    return {
+        "title":        stub.get("title", ""),
+        "url":          url,
+        "summary":      extracted.get("summary") or stub.get("summary", ""),
+        "full_text":    extracted.get("full_text", ""),
+        "published_at": extracted.get("published_at") or stub.get("published_at", ""),
+        "author":       extracted.get("author", ""),
+        "image_url":    extracted.get("image_url", ""),
+        "tags":         extracted.get("tags", []),
+        "word_count":   extracted.get("word_count", 0),
+        "scraped_at":   datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "source":       stub.get("source", "scraped"),
+    }
 
-        st.subheader("📊 Party Mentions — All Media")
-        overall: Counter = Counter()
-        for r in successful:
-            for p, s in r.get("party_bias", {}).items():
-                overall[p] += s
-        if overall:
-            df_p = pd.DataFrame(overall.items(), columns=["Party", "Mentions"]).sort_values("Mentions")
-            fig_p = px.bar(df_p, x="Mentions", y="Party", orientation="h",
-                           color="Party", color_discrete_map=PARTY_COLORS,
-                           title="Total Party Mentions Across All Scanned Media",
-                           template="plotly_white")
-            fig_p.update_layout(showlegend=False)
-            st.plotly_chart(fig_p, use_container_width=True)
 
-    # ── TAB 3: NARRATIVES ─────────────────────────────────────
-    with tab3:
-        st.subheader("📢 Emerging Narrative Detection")
-        st.caption("৩+ মিডিয়া একই phrase push করলে 🔴 COORDINATED হিসেবে চিহ্নিত হবে")
+# ============================================================
+# SINGLE OUTLET SCRAPER
+# ============================================================
 
-        narratives = detect_narratives(successful)
-        if narratives:
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                for n in narratives:
-                    badge = "🔴 COORDINATED" if n["coordinated"] else "🟡 Organic"
-                    theme_color = "#7c3aed" if n["theme"] != "General" else "#6b7280"
-                    st.markdown(f"""
-                    <div class="narrative-box">
-                        <b>"{n['phrase']}"</b>
-                        &nbsp;<span style="background:{theme_color};color:white;padding:2px 8px;
-                                    border-radius:10px;font-size:0.76rem;">{n['theme']}</span>
-                        &nbsp;<span style="font-size:0.8rem;">{badge}</span><br/>
-                        <span style="color:#6b7280;font-size:0.82rem;">
-                            {n['source_count']} outlets · {n['count']} mentions
-                        </span><br/>
-                        <span style="font-size:0.76rem;color:#9ca3af;">
-                            📰 {' · '.join(n['sources'][:6])}{'...' if len(n['sources'])>6 else ''}
-                        </span>
-                    </div>
-                    """, unsafe_allow_html=True)
+async def _scrape_one(outlet: dict, session, browser, semaphore: asyncio.Semaphore) -> dict:
+    async with semaphore:
+        domain     = _get_domain(outlet)
+        base_url   = _build_url(outlet)
+        name       = outlet.get("name", domain)
+        start      = time.time()
 
-            with col2:
-                coord   = sum(1 for n in narratives if n["coordinated"])
-                organic = len(narratives) - coord
-                st.metric("🔴 Coordinated", coord)
-                st.metric("🟡 Organic",     organic)
-                st.metric("📢 Total",        len(narratives))
-                outlets_in = len(set(s for n in narratives for s in n["sources"]))
-                st.metric("📰 Outlets",      outlets_in)
+        cfg        = SITE_SELECTORS.get(domain, _GENERIC_CFG)
+        rss_url    = cfg.get("rss")
+        tier       = cfg.get("tier", 1)
+        art_tier   = cfg.get("article_tier", 1)
+        max_arts   = outlet.get("max_articles", 15)
 
-                tc = Counter(n["theme"] for n in narratives)
-                fig_tc = px.pie(
-                    pd.DataFrame(tc.items(), columns=["Theme", "Count"]),
-                    values="Count", names="Theme", title="By Theme",
-                    color_discrete_sequence=px.colors.qualitative.Safe,
-                    template="plotly_white",
-                )
-                st.plotly_chart(fig_tc, use_container_width=True)
+        logger.info(f"► {name} ({domain})  tier={tier}  art_tier={art_tier}")
+
+        article_stubs = []
+        used_tier     = "Failed"
+
+        # ── Step 1: Get article stubs from homepage ──────
+
+        # Try direct HTML scrape
+        html = await _fetch_html(base_url, tier, session, browser)
+        if html:
+            stubs = _parse_html_articles(html, cfg, base_url)
+            if stubs:
+                article_stubs = stubs
+                used_tier = {1: "Tier1 (aiohttp)", 2: "Tier2 (Playwright)", 3: "Tier3 (Stealth)"}.get(tier, "Tier1 (aiohttp)")
+
+        # Try direct RSS feed
+        if not article_stubs and rss_url:
+            rss_stubs = await _direct_rss(rss_url, session)
+            if rss_stubs:
+                article_stubs = rss_stubs
+                used_tier = "Tier4 (GNews RSS)"
+
+        # Try Google News RSS
+        if not article_stubs:
+            gnews_stubs = await _gnews_rss(domain, session)
+            if gnews_stubs:
+                article_stubs = gnews_stubs
+                used_tier = "Tier4 (GNews RSS)"
+
+        # ── Step 2: Fetch full article content ───────────
+        articles = []
+        if article_stubs:
+            # RSS stubs already have basic content — only fetch full text for non-RSS
+            fetch_tasks = []
+            for stub in article_stubs[:max_arts]:
+                if stub.get("source") == "rss" and stub.get("full_text"):
+                    # RSS already has content — still try to enrich if URL is good
+                    if stub.get("url", "").startswith("http"):
+                        fetch_tasks.append(_fetch_article(stub, cfg, session, browser, art_tier))
+                    else:
+                        articles.append(stub)
+                else:
+                    fetch_tasks.append(_fetch_article(stub, cfg, session, browser, art_tier))
+
+            if fetch_tasks:
+                # Batch article fetches with small delay between them
+                for i in range(0, len(fetch_tasks), 3):
+                    batch = fetch_tasks[i:i+3]
+                    batch_results = await asyncio.gather(*batch, return_exceptions=True)
+                    for r in batch_results:
+                        if isinstance(r, dict):
+                            articles.append(r)
+                    if i + 3 < len(fetch_tasks):
+                        await asyncio.sleep(0.3)
+
+        elapsed = round(time.time() - start, 2)
+        status  = "success" if articles else "failed"
+
+        if articles:
+            titles = [a["title"] for a in articles]
+            # Deduplicate
+            seen, unique = set(), []
+            for a in articles:
+                key = re.sub(r'\W+', '', a["title"].lower())[:60]
+                if key and key not in seen:
+                    seen.add(key)
+                    unique.append(a)
+            articles = unique
+            logger.info(f"  ✅ {name}: {len(articles)} articles via {used_tier} ({elapsed}s)")
         else:
-            st.info("More outlets needed to detect narratives. Try selecting more categories.")
+            titles = []
+            logger.warning(f"  ❌ {name}: failed ({elapsed}s)")
 
-    # ── TAB 4: THREATS ────────────────────────────────────────
-    with tab4:
-        st.subheader("⚠️ Threat Intelligence Dashboard")
-        signals = detect_threats(successful)
+        return {
+            # App.py compatibility fields
+            "name":             name,
+            "website":          domain,
+            "url":              base_url,
+            "key_person":       outlet.get("key_person", "—"),
+            "category":         outlet.get("category", "general"),
+            "status":           status,
+            "tier":             used_tier,
+            "headlines":        [a["title"] for a in articles],   # backward compat
+            "count":            len(articles),
+            "elapsed_sec":      elapsed,
+            "scraped_at":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "error":            None if articles else "All scraping tiers exhausted",
+            # NEW: full article data
+            "articles":         articles,
+            "total_words":      sum(a.get("word_count", 0) for a in articles),
+        }
 
-        if signals:
-            high_signals = [s for s in signals if s["level"] == "HIGH"]
-            med_signals  = [s for s in signals if s["level"] == "MEDIUM"]
-            st.error(f"🚨 {len(signals)} threat signal(s) detected! ({len(high_signals)} HIGH, {len(med_signals)} MEDIUM)")
-            for ts in signals:
-                css = "alert-danger" if ts["level"] == "HIGH" else "alert-warning"
-                outlets_str = f"<br/><small>Outlets: {', '.join(ts['outlets'][:8])}</small>" if ts.get("outlets") else ""
-                st.markdown(f"""
-                <div class="alert-box {css}">
-                    <b>{_threat_icon(ts['level'])} {ts['type']}</b><br/>
-                    {ts['detail']}{outlets_str}
-                </div>
-                """, unsafe_allow_html=True)
-        else:
-            st.success("✅ No coordinated threat campaigns detected in current scan.")
 
-        st.markdown("---")
-        st.subheader("📊 Threat Score by Outlet")
-        td = sorted(
-            [{"Outlet": r["name"], "Score": r.get("threat_score", 0), "Level": r.get("threat_level", "LOW")}
-             for r in (filtered if threat_filter != "All" else successful)],
-            key=lambda x: x["Score"], reverse=True
+# ============================================================
+# ASYNC RUNNER
+# ============================================================
+
+async def _run_async(outlets: list, concurrency: int) -> list:
+    semaphore  = asyncio.Semaphore(concurrency)
+    connector  = None
+    session    = None
+
+    if HAS_AIOHTTP:
+        connector = aiohttp.TCPConnector(
+            limit=concurrency * 3,
+            ttl_dns_cache=300,
+            ssl=False,
+            enable_cleanup_closed=True,
         )
-        if td:
-            df_td = pd.DataFrame(td)
-            fig_td = px.bar(
-                df_td, x="Outlet", y="Score", color="Level",
-                color_discrete_map={"HIGH": "#dc2626", "MEDIUM": "#d97706", "LOW": "#16a34a"},
-                title="Threat Score per Outlet", template="plotly_white",
+        session = aiohttp.ClientSession(
+            connector=connector,
+            headers={"User-Agent": _ua()},
+        )
+
+    browser        = None
+    playwright_ctx = None
+
+    if HAS_PLAYWRIGHT:
+        try:
+            playwright_ctx = await async_playwright().start()
+            browser = await playwright_ctx.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-web-security",
+                    "--disable-features=IsolateOrigins,site-per-process",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--disable-background-networking",
+                    "--disable-sync",
+                    "--mute-audio",
+                    "--ignore-certificate-errors",
+                    "--disable-blink-features=AutomationControlled",
+                ],
             )
-            fig_td.update_layout(xaxis_tickangle=-35, height=380)
-            st.plotly_chart(fig_td, use_container_width=True)
+            logger.info("✅ Playwright Chromium launched")
+        except Exception as e:
+            logger.warning(f"⚠️ Playwright unavailable: {e}")
+            browser, playwright_ctx = None, None
 
-        st.subheader("🔑 Top Threat Keywords Detected")
-        kw_hits: Counter = Counter()
-        for r in successful:
-            for a in r.get("analyzed_headlines", []):
-                for kw in a.get("threat_hits", []):
-                    kw_hits[kw] += 1
-        if kw_hits:
-            df_kw = pd.DataFrame(kw_hits.most_common(18), columns=["Keyword", "Count"])
-            fig_kw = px.bar(df_kw, x="Count", y="Keyword", orientation="h",
-                            color="Count", color_continuous_scale="Reds",
-                            title="Most Frequent Threat Keywords", template="plotly_white")
-            st.plotly_chart(fig_kw, use_container_width=True)
+    results = []
+    try:
+        tasks   = [_scrape_one(o, session, browser, semaphore) for o in outlets]
+        results = await asyncio.gather(*tasks, return_exceptions=False)
+    except Exception as e:
+        logger.error(f"Gather error: {e}")
+    finally:
+        for obj, method in [
+            (browser,        "close"),
+            (playwright_ctx, "stop"),
+            (session,        "close"),
+            (connector,      "close"),
+        ]:
+            if obj:
+                try:
+                    await getattr(obj, method)()
+                except Exception:
+                    pass
 
-    # ── TAB 5: PREDICTION ─────────────────────────────────────
-    with tab5:
-        st.subheader("🔮 Predictive Political Intelligence")
-        st.caption("Current media signal analysis → 2–4 week political forecast")
-
-        preds = predict_issues(successful)
-        if preds:
-            for i, p in enumerate(preds, 1):
-                intensity = p["intensity"]
-                color = "#dc2626" if intensity >= 70 else ("#d97706" if intensity >= 40 else "#16a34a")
-                st.markdown(f"""
-                <div class="predict-card" style="border-left:6px solid {color};">
-                    <div style="display:flex; justify-content:space-between; align-items:center;">
-                        <b style="font-size:1.05rem;">#{i} {p['theme']}</b>
-                        <span style="background:{color};color:white;padding:4px 12px;
-                                     border-radius:12px;font-size:0.82rem;font-weight:700;">
-                            {intensity}% Signal
-                        </span>
-                    </div>
-                    <p style="margin:8px 0 0 0;color:#374151;font-size:0.92rem;">{p['prediction']}</p>
-                    <span style="font-size:0.78rem;color:#9ca3af;">Media mentions: {p['count']}</span>
-                </div>
-                """, unsafe_allow_html=True)
-
-            st.markdown("---")
-            df_pred = pd.DataFrame(preds)
-            fig_pred = px.bar(
-                df_pred, x="theme", y="intensity",
-                color="intensity", color_continuous_scale="RdYlGn_r",
-                title="Predicted Issue Intensity (Next 2–4 Weeks)",
-                labels={"theme": "Political Theme", "intensity": "Signal Strength (%)"},
-                template="plotly_white",
-            )
-            fig_pred.update_layout(showlegend=False, xaxis_tickangle=-20)
-            st.plotly_chart(fig_pred, use_container_width=True)
-        else:
-            st.info("Not enough data for predictions. Run a scan first.")
-
-    # ── TAB 6: SEARCH ─────────────────────────────────────────
-    with tab6:
-        st.subheader("🔍 Cross-Media Headline Intelligence Search")
-        col_s1, col_s2 = st.columns([3, 1])
-        with col_s1:
-            q = st.text_input("Search term", placeholder="e.g. নির্বাচন / election / bnp / yunus / arrest")
-        with col_s2:
-            search_party = st.selectbox("Filter by party", ["All"] + list(PARTY_KEYWORDS.keys()),
-                                        key="search_party")
-
-        if q:
-            matches = []
-            for r in successful:
-                if search_party != "All" and r.get("dominant_party") != search_party:
-                    continue
-                for h in r.get("headlines", []):
-                    if q.lower() in h.lower():
-                        a = analyze_text(h)
-                        matches.append({
-                            "Source":    r["name"],
-                            "Category":  r["category"].replace("_", " ").title(),
-                            "Tier":      r.get("tier", "—"),
-                            "Headline":  h,
-                            "Sentiment": a["sentiment"],
-                            "Party":     a.get("dominant_party") or "—",
-                            "Theme":     a.get("dominant_theme", "—"),
-                        })
-
-            st.write(f"**{len(matches)} results** found for `{q}`")
-            if matches:
-                df_m = pd.DataFrame(matches)
-                st.dataframe(
-                    df_m.style.applymap(
-                        lambda v: "color:#16a34a;font-weight:600" if v == "Positive"
-                        else ("color:#dc2626;font-weight:600" if v == "Negative" else ""),
-                        subset=["Sentiment"]
-                    ),
-                    use_container_width=True, height=400,
-                )
-
-                # Sentiment breakdown of search results
-                sent_ct = Counter(m["Sentiment"] for m in matches)
-                fig_s = px.pie(
-                    pd.DataFrame(sent_ct.items(), columns=["Sentiment", "Count"]),
-                    values="Count", names="Sentiment",
-                    color="Sentiment",
-                    color_discrete_map={"Positive": "#16a34a", "Neutral": "#6b7280", "Negative": "#dc2626"},
-                    title=f"Sentiment of results for '{q}'",
-                    template="plotly_white",
-                )
-                st.plotly_chart(fig_s, use_container_width=True)
+    return list(results)
 
 
-    # ── TAB 7: WORDPRESS ──────────────────────────────────────
-    with tab7:
-        st.subheader("🌐 WordPress Auto-Publish")
-        st.caption("স্ক্যান ফলাফল সরাসরি WordPress সাইটে পোস্ট করুন")
+# ============================================================
+# PUBLIC API
+# ============================================================
 
-        with st.expander("🔑 WordPress Credentials", expanded=True):
-            st.info(
-                "**Application Password ব্যবহার করুন**\n\n"
-                "WordPress Admin → Users → Profile → Application Passwords → নতুন পাসওয়ার্ড তৈরি করুন\n\n"
-                "⚠️ Regular login password কাজ করবে না।"
-            )
-            wc1, wc2 = st.columns(2)
-            with wc1:
-                wp_url  = st.text_input("🔗 WordPress URL", placeholder="https://your-site.com",
-                                        value=st.session_state.get("wp_url", ""), key="wp_url_input")
-                wp_user = st.text_input("👤 Username", placeholder="admin",
-                                        value=st.session_state.get("wp_user", ""), key="wp_user_input")
-            with wc2:
-                wp_pass   = st.text_input("🔐 Application Password",
-                                          placeholder="xxxx xxxx xxxx xxxx xxxx xxxx",
-                                          type="password", key="wp_pass_input")
-                wp_status = st.selectbox("📤 Post Status", ["draft", "publish", "pending"],
-                                         index=0, key="wp_status_input",
-                                         help="draft = ড্রাফট হিসেবে সেভ হবে, পাবলিশ হবে না")
-            if st.button("🔌 Test Connection"):
-                if wp_url and wp_user and wp_pass:
-                    with st.spinner("Connecting..."):
-                        conn = wp_test_connection(wp_url, wp_user, wp_pass)
-                    if conn["ok"]:
-                        st.success("✅ Connected! User: **" + conn["name"] + "** | Roles: " + ", ".join(conn["roles"]))
-                        st.session_state["wp_url"]  = wp_url
-                        st.session_state["wp_user"] = wp_user
-                    else:
-                        st.error("❌ Failed: " + conn["error"])
-                else:
-                    st.warning("URL, Username ও Password সব দিন।")
+def run_scraper(outlets: list, concurrency: int = 5) -> list:
+    """
+    Main entry point — called by app.py.
 
-        if not successful:
-            st.warning("⚠️ WordPress-এ পোস্ট করতে আগে scan চালান।")
-        else:
-            st.markdown("---")
+    Args:
+        outlets:     List of outlet dicts {name, website, key_person, category}
+        concurrency: Max parallel outlet scrapers (4-6 recommended on HF Spaces)
+                     Note: each outlet may spawn additional article fetches.
 
-            # Optional: fetch WP categories
-            wp_url_val  = st.session_state.get("wp_url", "")
-            wp_user_val = st.session_state.get("wp_user", "")
-            wp_pass_val = st.session_state.get("wp_pass_input", "")
-            cat_ids_wp  = []
+    Returns:
+        List of result dicts. Each includes:
+          - headlines:  [str]          backward-compatible list of titles
+          - articles:   [dict]         full article objects with title+body+meta
+          - count:      int
+          - status:     'success'|'failed'
+          - tier:       str
+          - ...other metadata fields
+    """
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            raise RuntimeError("closed")
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
-            with st.expander("🗂️ WordPress Category (optional)"):
-                if wp_url_val and wp_user_val and wp_pass_val:
-                    if st.button("📂 Fetch WP Categories"):
-                        wpcats = wp_get_categories(wp_url_val, wp_user_val, wp_pass_val)
-                        st.session_state["wp_cats"] = wpcats
-                    wpcats_list = st.session_state.get("wp_cats", [])
-                    if wpcats_list:
-                        cat_map = {c["name"]: c["id"] for c in wpcats_list}
-                        sel_wpcat = st.selectbox("Category", ["— None —"] + list(cat_map.keys()))
-                        if sel_wpcat != "— None —":
-                            cat_ids_wp = [cat_map[sel_wpcat]]
-                else:
-                    st.info("Credentials সেট করুন তারপর categories দেখতে পারবেন।")
-
-            pub_mode = st.radio(
-                "পোস্ট মোড",
-                ["📄 Summary Post", "📋 Per-Outlet Posts", "🎯 Selected Outlets"],
-                horizontal=True
-            )
-
-            wp_url_cur  = st.session_state.get("wp_url_input", "") or st.session_state.get("wp_url", "")
-            wp_user_cur = st.session_state.get("wp_user_input", "") or st.session_state.get("wp_user", "")
-            wp_pass_cur = st.session_state.get("wp_pass_input", "")
-            wp_stat_cur = st.session_state.get("wp_status_input", "draft")
-
-            if "Summary" in pub_mode:
-                wp_title, wp_html = build_wp_summary_post(results, scan_time)
-                with st.expander("👁️ Preview Post"):
-                    st.write("**Title:** " + wp_title)
-                    st.components.v1.html(wp_html, height=380, scrolling=True)
-                if st.button("🚀 Publish Summary Post to WordPress", type="primary", use_container_width=True):
-                    if not (wp_url_cur and wp_user_cur and wp_pass_cur):
-                        st.error("❌ Credentials দিন।")
-                    else:
-                        with st.spinner("Publishing..."):
-                            pub_res = wp_post_article(
-                                wp_url_cur, wp_user_cur, wp_pass_cur,
-                                wp_title, wp_html, status=wp_stat_cur,
-                                category_ids=cat_ids_wp,
-                                tags=["political-intelligence", "bangladesh", "media-analysis"]
-                            )
-                        if pub_res["ok"]:
-                            st.success("✅ Published! Post ID: **" + str(pub_res["id"]) + "**")
-                            if pub_res.get("link"):
-                                st.markdown("🔗 [পোস্ট দেখুন](" + pub_res["link"] + ")")
-                        else:
-                            st.error("❌ Failed: " + pub_res["error"])
-
-            elif "Per-Outlet" in pub_mode:
-                outlet_posts = build_per_outlet_posts(results)
-                st.info("**" + str(len(outlet_posts)) + " posts** তৈরি হবে — প্রতি outlet আলাদা পোস্ট")
-                pa_col, pb_col = st.columns(2)
-                with pa_col:
-                    pub_delay = st.slider("Delay between posts (seconds)", 0, 5, 1, key="pub_delay")
-                if st.button("🚀 Publish " + str(len(outlet_posts)) + " Posts", type="primary", use_container_width=True):
-                    if not (wp_url_cur and wp_user_cur and wp_pass_cur):
-                        st.error("❌ Credentials দিন।")
-                    else:
-                        wp_prog = st.progress(0, "Publishing...")
-                        pub_ok_n, pub_fail_n = 0, 0
-                        for idx, opost in enumerate(outlet_posts):
-                            pub_r = wp_post_article(
-                                wp_url_cur, wp_user_cur, wp_pass_cur,
-                                opost["title"], opost["content"],
-                                status=wp_stat_cur, category_ids=cat_ids_wp,
-                                tags=opost.get("tags", [])
-                            )
-                            if pub_r["ok"]:
-                                pub_ok_n += 1
-                                link_html = ("<a href=\"" + pub_r.get("link","") + "\" target=\"_blank\">Post #" + str(pub_r.get("id","")) + "</a>")
-                                st.markdown(
-                                    "<div class=\"wp-card\">✅ <b>" + opost["outlet_name"] + "</b> — " + link_html + "</div>",
-                                    unsafe_allow_html=True
-                                )
-                            else:
-                                pub_fail_n += 1
-                                st.markdown(
-                                    "<div class=\"wp-error\">❌ <b>" + opost["outlet_name"] + "</b> — " + pub_r["error"][:80] + "</div>",
-                                    unsafe_allow_html=True
-                                )
-                            wp_prog.progress((idx + 1) / len(outlet_posts))
-                            if pub_delay > 0:
-                                time.sleep(pub_delay)
-                        wp_prog.empty()
-                        st.success("✅ " + str(pub_ok_n) + "/" + str(len(outlet_posts)) + " published! | ❌ " + str(pub_fail_n) + " failed")
-
-            else:
-                outlet_names_list = [r["name"] for r in successful]
-                sel_outlet_names  = st.multiselect("Outlets বেছে নিন", outlet_names_list, default=outlet_names_list[:3])
-                sel_o_posts = build_per_outlet_posts([r for r in successful if r["name"] in sel_outlet_names])
-                if sel_o_posts:
-                    if st.button("🚀 Publish " + str(len(sel_o_posts)) + " Selected Posts",
-                                 type="primary", use_container_width=True):
-                        if not (wp_url_cur and wp_user_cur and wp_pass_cur):
-                            st.error("❌ Credentials দিন।")
-                        else:
-                            pub_ok_s = 0
-                            for sop in sel_o_posts:
-                                pub_r = wp_post_article(
-                                    wp_url_cur, wp_user_cur, wp_pass_cur,
-                                    sop["title"], sop["content"],
-                                    status=wp_stat_cur, category_ids=cat_ids_wp,
-                                    tags=sop.get("tags", [])
-                                )
-                                if pub_r["ok"]:
-                                    pub_ok_s += 1
-                                    link_h = ("<a href=\"" + pub_r.get("link","") + "\" target=\"_blank\">Post #" + str(pub_r.get("id","")) + "</a>")
-                                    st.markdown("<div class=\"wp-card\">✅ <b>" + sop["outlet_name"] + "</b> — " + link_h + "</div>",
-                                                unsafe_allow_html=True)
-                                else:
-                                    st.markdown("<div class=\"wp-error\">❌ <b>" + sop["outlet_name"] + "</b> — " + pub_r["error"][:80] + "</div>",
-                                                unsafe_allow_html=True)
-                            st.success("✅ " + str(pub_ok_s) + "/" + str(len(sel_o_posts)) + " published!")
+    try:
+        return loop.run_until_complete(_run_async(outlets, concurrency))
+    except Exception as e:
+        logger.error(f"run_scraper fatal: {e}")
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        return [
+            {
+                "name":        o.get("name", "?"),
+                "website":     _get_domain(o),
+                "url":         _build_url(o),
+                "key_person":  o.get("key_person", "—"),
+                "category":    o.get("category", "general"),
+                "status":      "failed",
+                "tier":        "Failed",
+                "headlines":   [],
+                "articles":    [],
+                "count":       0,
+                "elapsed_sec": 0,
+                "scraped_at":  ts,
+                "error":       str(e),
+                "total_words": 0,
+            }
+            for o in outlets
+        ]
 
 
-    # ── TAB 8: RAW DATA ───────────────────────────────────────
-    with tab8:
-        st.subheader("🔬 Raw Scrape Data & Export")
-
-        col_r1, col_r2, col_r3 = st.columns(3)
-        col_r1.metric("Total Outlets",   len(results))
-        col_r2.metric("Successful",       len(successful))
-        col_r3.metric("Total Headlines",  sum(r["count"] for r in successful))
-
-        for r in results:
-            status_icon = "✅" if r["status"] == "success" else ("⏭️" if r["status"] == "skipped" else "❌")
-            tier = r.get("tier", "Failed")
-            tc, ti = TIER_CSS.get(tier, ("tierfail", "❓"))
-            with st.expander(
-                f"{status_icon} {r['name']} — {r['count']} headlines — "
-                f"{r.get('elapsed_sec','?')}s — {tier}"
-            ):
-                col_a, col_b = st.columns([1, 2])
-                with col_a:
-                    st.markdown(_tier_badge(tier), unsafe_allow_html=True)
-                    st.write(f"**URL:** `{r.get('url','—')}`")
-                    st.write(f"**Key Person:** {r.get('key_person','—')}")
-                    st.write(f"**Scraped at:** {r.get('scraped_at','—')}")
-                    if r.get("error"):
-                        st.error(f"Error: {r['error'][:120]}")
-                with col_b:
-                    hls = r.get("headlines", [])
-                    if hls:
-                        for hl in hls[:20]:
-                            st.write(f"• {hl}")
-                        if len(hls) > 20:
-                            st.caption(f"... and {len(hls)-20} more headlines")
-                    else:
-                        st.warning("No headlines scraped.")
-
-        st.markdown("---")
-        st.subheader("📥 Export")
-        col_e1, col_e2 = st.columns(2)
-        with col_e1:
-            export_data = [
-                {k: v for k, v in r.items() if k != "analyzed_headlines"}
-                for r in results
-            ]
-            st.download_button(
-                label="📥 Download Full JSON",
-                data=json.dumps(export_data, ensure_ascii=False, indent=2),
-                file_name=f"media_intel_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
-                mime="application/json",
-                use_container_width=True,
-            )
-        with col_e2:
-            if successful:
-                rows_csv = []
-                for r in successful:
-                    for hl in r.get("headlines", []):
-                        a = analyze_text(hl)
-                        rows_csv.append({
-                            "source":    r["name"],
-                            "category":  r["category"],
-                            "headline":  hl,
-                            "sentiment": a["sentiment"],
-                            "party":     a.get("dominant_party") or "",
-                            "theme":     a.get("dominant_theme", ""),
-                            "threat":    a.get("threat_level", ""),
-                        })
-                if rows_csv:
-                    df_csv = pd.DataFrame(rows_csv)
-                    st.download_button(
-                        label="📥 Download Headlines CSV",
-                        data=df_csv.to_csv(index=False, encoding="utf-8-sig"),
-                        file_name=f"headlines_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-                        mime="text/csv",
-                        use_container_width=True,
-                    )
-
+# ============================================================
+# STANDALONE TEST
+# ============================================================
 
 if __name__ == "__main__":
-    main()
+    import sys
+
+    TEST_OUTLETS = [
+        {"name": "Prothom Alo",    "website": "prothomalo.com",   "key_person": "Matiur Rahman", "category": "bd_newspaper",  "max_articles": 5},
+        {"name": "Daily Star",     "website": "thedailystar.net", "key_person": "Mahfuz Anam",   "category": "bd_english",    "max_articles": 5},
+        {"name": "Al Jazeera",     "website": "aljazeera.com",    "key_person": "—",             "category": "international", "max_articles": 5},
+        {"name": "BBC News",       "website": "bbc.com",          "key_person": "—",             "category": "international", "max_articles": 5},
+        {"name": "Somoy TV",       "website": "somoynews.tv",     "key_person": "—",             "category": "bd_tv",         "max_articles": 5},
+        {"name": "NDTV",           "website": "ndtv.com",         "key_person": "—",             "category": "indian_news",   "max_articles": 5},
+    ]
+
+    print("=" * 70)
+    print("  SCRAPER ENGINE v4.0 — ULTRA ADVANCED — Standalone Test")
+    print("=" * 70)
+
+    results = run_scraper(TEST_OUTLETS, concurrency=3)
+
+    total_articles = 0
+    total_words    = 0
+
+    for r in results:
+        icon = "✅" if r["status"] == "success" else "❌"
+        print(f"\n{icon} {r['name']:28} | {r['tier']:22} | {r['count']:3} arts | {r['total_words']:6} words | {r['elapsed_sec']}s")
+
+        for art in r.get("articles", [])[:3]:
+            title   = art.get("title", "")[:65]
+            wc      = art.get("word_count", 0)
+            auth    = art.get("author", "") or "—"
+            pub     = art.get("published_at", "")[:16] or "—"
+            has_txt = "✓" if len(art.get("full_text", "")) > 100 else "✗"
+            print(f"   [{has_txt}] {title}")
+            print(f"       Author: {auth:<20} | Published: {pub} | Words: {wc}")
+            if art.get("summary"):
+                print(f"       Summary: {art['summary'][:90]}…")
+
+        total_articles += r["count"]
+        total_words    += r.get("total_words", 0)
+
+    print(f"\n{'='*70}")
+    success = sum(1 for r in results if r["status"] == "success")
+    print(f"  Outlets: {len(results)} | Success: {success} | Articles: {total_articles} | Words: {total_words:,}")
+    print("=" * 70)
