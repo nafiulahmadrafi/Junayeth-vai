@@ -1,22 +1,5 @@
 import streamlit as st
-import streamlit as st
 import os
-
-# Cloud-e Playwright browser install korar jonno
-os.system("playwright install chromium")
-
-st.set_page_config(
-    page_title="Political Media Intelligence",
-    # ... baki code
-)
-
-st.set_page_config(
-    page_title="Political Media Intelligence",
-    page_icon="🧠",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -27,8 +10,24 @@ from datetime import datetime
 from collections import Counter, defaultdict
 from textblob import TextBlob
 
-# Import our powerful scraping engine
-from scraper_engine import run_scraper, SITE_SELECTORS
+# ১. ক্লাউডে ব্রাউজার ইনস্টল করার কমান্ড (ইমপোর্টের পরেই রাখা ভালো)
+os.system("playwright install chromium")
+
+# ২. Streamlit পেজ কনফিগারেশন (এটি শুধুমাত্র একবারই ব্যবহার করতে হয়)
+st.set_page_config(
+    page_title="Political Media Intelligence",
+    page_icon="🧠",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# ৩. আপনার স্ক্র্যাপার ইঞ্জিন ইমপোর্ট (নিশ্চিত করুন ফাইলের নাম scraper_engine.py)
+try:
+    from scraper_engine import run_scraper, SITE_SELECTORS
+except ImportError:
+    st.error("Error: 'scraper_engine.py' ফাইলটি খুঁজে পাওয়া যায়নি। দয়া করে ফাইলের নাম চেক করুন।")
+
+# ... এরপর আপনার বাকি কোড শুরু হবে
 
 # ============================================================
 # MEDIA DIRECTORY
