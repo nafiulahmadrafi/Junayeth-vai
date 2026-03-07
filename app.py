@@ -1,4 +1,14 @@
 import streamlit as st
+import streamlit as st
+import os
+
+# Cloud-e Playwright browser install korar jonno
+os.system("playwright install chromium")
+
+st.set_page_config(
+    page_title="Political Media Intelligence",
+    # ... baki code
+)
 
 st.set_page_config(
     page_title="Political Media Intelligence",
