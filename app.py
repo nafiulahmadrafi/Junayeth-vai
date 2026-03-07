@@ -270,10 +270,8 @@ st.markdown("""
   .alert-warning { background: #fffbeb; border-color: #f59e0b; color: #92400e; }
   .alert-danger  { background: #fff1f2; border-color: #dc2626; color: #991b1b; }
 
-
   .wp-card  { border:1px solid #d1fae5; background:#f0fdf4; border-radius:12px; padding:14px; margin:6px 0; border-left:5px solid #16a34a; }
   .wp-error { border:1px solid #fca5a5; background:#fff1f2; border-radius:12px; padding:12px; margin:6px 0; border-left:5px solid #dc2626; }
-  /* Hide Streamlit branding */
   #MainMenu, footer { visibility: hidden; }
   .stDeployButton { display: none; }
 </style>
@@ -317,15 +315,15 @@ def analyze_text(text: str) -> dict:
     theme_scores = {t: s for t, s in theme_scores.items() if s > 0}
 
     return {
-        "sentiment":     label,
-        "polarity":      polarity,
-        "party_scores":  party_scores,
+        "sentiment":      label,
+        "polarity":       polarity,
+        "party_scores":   party_scores,
         "dominant_party": max(party_scores, key=party_scores.get) if party_scores else None,
-        "threat_score":  threat_score,
-        "threat_level":  threat_level,
-        "threat_hits":   threat_hits,
+        "threat_score":   threat_score,
+        "threat_level":   threat_level,
+        "threat_hits":    threat_hits,
         "dominant_theme": max(theme_scores, key=theme_scores.get) if theme_scores else "General",
-        "theme_scores":  theme_scores,
+        "theme_scores":   theme_scores,
     }
 
 
@@ -346,8 +344,8 @@ def analyze_outlet_results(raw: dict) -> dict:
     party_agg = defaultdict(int)
     theme_agg = defaultdict(int)
     for a in analyzed:
-        for p, s in a["party_scores"].items():   party_agg[p] += s
-        for t, s in a["theme_scores"].items():   theme_agg[t] += s
+        for p, s in a["party_scores"].items():  party_agg[p] += s
+        for t, s in a["theme_scores"].items():  theme_agg[t] += s
 
     avg_threat = sum(a["threat_score"] for a in analyzed) / len(analyzed) if analyzed else 0
     threat_level = "HIGH" if avg_threat >= 50 else ("MEDIUM" if avg_threat >= 25 else "LOW")
@@ -374,7 +372,7 @@ def detect_narratives(results: list) -> list:
     all_hl = [{"text": h, "source": r["name"]}
               for r in results for h in r.get("headlines", [])]
 
-    bigram_freq: Counter  = Counter()
+    bigram_freq: Counter     = Counter()
     bigram_src:  defaultdict = defaultdict(set)
 
     for item in all_hl:
@@ -394,12 +392,12 @@ def detect_narratives(results: list) -> list:
             "General"
         )
         narratives.append({
-            "phrase":      bg,
-            "count":       count,
-            "sources":     sources,
+            "phrase":       bg,
+            "count":        count,
+            "sources":      sources,
             "source_count": len(sources),
-            "theme":       theme,
-            "coordinated": len(sources) >= 3,
+            "theme":        theme,
+            "coordinated":  len(sources) >= 3,
         })
 
     return sorted(narratives, key=lambda x: (x["source_count"], x["count"]), reverse=True)[:12]
@@ -434,7 +432,6 @@ def detect_threats(results: list) -> list:
                 "outlets": outlets,
             })
 
-    # Surge detection: theme suddenly dominant
     theme_counter: Counter = Counter()
     for r in results:
         for t, c in r.get("narrative_themes", {}).items():
@@ -502,10 +499,15 @@ def _kpi(label: str, value, sub: str = "") -> str:
 def _threat_icon(level: str) -> str:
     return {"HIGH": "🔴", "MEDIUM": "🟡", "LOW": "🟢"}.get(level, "⚪")
 
-
-# ============================================================
-# MAIN APP
-# ============================================================
+# ── matplotlib-free sentiment coloring ──────────────────────
+def _color_sentiment(val):
+    try:
+        v = float(val)
+        if v > 0.1:  return "background:#d1fae5;color:#065f46;font-weight:600"
+        if v < -0.1: return "background:#fee2e2;color:#991b1b;font-weight:600"
+        return "background:#f3f4f6;color:#374151"
+    except Exception:
+        return ""
 
 
 # ============================================================
@@ -518,7 +520,7 @@ def wp_test_connection(url, user, password):
                          auth=(user, password), timeout=10)
         if r.status_code == 200:
             d = r.json()
-            return {"ok": True, "name": d.get("name","?"), "roles": d.get("roles",[])}
+            return {"ok": True, "name": d.get("name", "?"), "roles": d.get("roles", [])}
         return {"ok": False, "error": "HTTP " + str(r.status_code)}
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -526,7 +528,7 @@ def wp_test_connection(url, user, password):
 
 def wp_get_categories(url, user, password):
     try:
-        r = requests.get(url.rstrip("/")+"/wp-json/wp/v2/categories?per_page=50",
+        r = requests.get(url.rstrip("/") + "/wp-json/wp/v2/categories?per_page=50",
                          auth=(user, password), timeout=10)
         if r.status_code == 200:
             return [{"id": c["id"], "name": c["name"]} for c in r.json()]
@@ -545,13 +547,13 @@ def wp_post_article(url, user, password, title, content,
         tag_ids = []
         for tag in tags[:5]:
             try:
-                te = url.rstrip("/")+"/wp-json/wp/v2/tags?search="+str(tag)
+                te = url.rstrip("/") + "/wp-json/wp/v2/tags?search=" + str(tag)
                 tr = requests.get(te, auth=(user, password), timeout=8)
                 existing = tr.json() if tr.status_code == 200 else []
                 if existing:
                     tag_ids.append(existing[0]["id"])
                 else:
-                    tc_r = requests.post(url.rstrip("/")+"/wp-json/wp/v2/tags",
+                    tc_r = requests.post(url.rstrip("/") + "/wp-json/wp/v2/tags",
                                          json={"name": tag}, auth=(user, password), timeout=8)
                     if tc_r.status_code in (200, 201):
                         tag_ids.append(tc_r.json()["id"])
@@ -592,46 +594,46 @@ def build_wp_summary_post(results, scan_time):
         party = r.get("dominant_party") or "—"
         pc    = PARTY_COLORS.get(party, "#6b7280")
         items = "".join(
-            "<li style=\'margin-bottom:4px;font-size:0.92em;\'>" + hl + "</li>"
+            "<li style='margin-bottom:4px;font-size:0.92em;'>" + hl + "</li>"
             for hl in r.get("headlines", [])[:8]
         )
         extra = len(r.get("headlines", [])) - 8
         if extra > 0:
-            items += "<li style=\'color:#9ca3af;\'>... আরো " + str(extra) + "টি</li>"
+            items += "<li style='color:#9ca3af;'>... আরো " + str(extra) + "টি</li>"
         rows_html += (
-            "<div style=\'border:1px solid #e2e8f0;border-radius:8px;padding:14px;margin:10px 0;"
-            "border-left:4px solid " + pc + ";\'>\n"
+            "<div style='border:1px solid #e2e8f0;border-radius:8px;padding:14px;margin:10px 0;"
+            "border-left:4px solid " + pc + ";'>\n"
             "<strong>" + r["name"] + "</strong> "
-            "<span style=\'background:" + pc + ";color:white;padding:2px 8px;border-radius:10px;"
-            "font-size:0.78em;\'>" + party + "</span>"
-            "<span style=\'background:" + threat_c + ";color:white;padding:2px 8px;border-radius:10px;"
-            "font-size:0.78em;margin-left:4px;\'>⚠️ " + r.get("threat_level", "LOW") + "</span>"
-            "<br/><ul style=\'margin:8px 0;padding-left:18px;\'>" + items + "</ul></div>\n"
+            "<span style='background:" + pc + ";color:white;padding:2px 8px;border-radius:10px;"
+            "font-size:0.78em;'>" + party + "</span>"
+            "<span style='background:" + threat_c + ";color:white;padding:2px 8px;border-radius:10px;"
+            "font-size:0.78em;margin-left:4px;'>⚠️ " + r.get("threat_level", "LOW") + "</span>"
+            "<br/><ul style='margin:8px 0;padding-left:18px;'>" + items + "</ul></div>\n"
         )
     html = (
-        "<div style=\'background:#f8fafc;border-left:5px solid #7c3aed;padding:16px;"
-        "border-radius:0 10px 10px 0;margin-bottom:20px;\'>"
-        "<h2 style=\'color:#1e3a8a;margin:0 0 8px;\'>Political Media Intelligence Report</h2>"
-        "<p style=\'color:#6b7280;margin:0;font-size:0.9em;\'>" + scan_time + "</p></div>"
+        "<div style='background:#f8fafc;border-left:5px solid #7c3aed;padding:16px;"
+        "border-radius:0 10px 10px 0;margin-bottom:20px;'>"
+        "<h2 style='color:#1e3a8a;margin:0 0 8px;'>Political Media Intelligence Report</h2>"
+        "<p style='color:#6b7280;margin:0;font-size:0.9em;'>" + scan_time + "</p></div>"
         "<h3>স্ক্যান সারসংক্ষেপ</h3>"
-        "<table style=\'width:100%;border-collapse:collapse;margin-bottom:20px;\'>"
-        "<tr style=\'background:#f1f5f9;\'>"
-        "<td style=\'padding:10px;border:1px solid #e2e8f0;font-weight:600;\'>সফল আউটলেট</td>"
-        "<td style=\'padding:10px;border:1px solid #e2e8f0;\'>" + str(len(successful)) + " টি</td>"
-        "<td style=\'padding:10px;border:1px solid #e2e8f0;font-weight:600;\'>মোট শিরোনাম</td>"
-        "<td style=\'padding:10px;border:1px solid #e2e8f0;\'>" + str(total_hl) + " টি</td></tr>"
+        "<table style='width:100%;border-collapse:collapse;margin-bottom:20px;'>"
+        "<tr style='background:#f1f5f9;'>"
+        "<td style='padding:10px;border:1px solid #e2e8f0;font-weight:600;'>সফল আউটলেট</td>"
+        "<td style='padding:10px;border:1px solid #e2e8f0;'>" + str(len(successful)) + " টি</td>"
+        "<td style='padding:10px;border:1px solid #e2e8f0;font-weight:600;'>মোট শিরোনাম</td>"
+        "<td style='padding:10px;border:1px solid #e2e8f0;'>" + str(total_hl) + " টি</td></tr>"
         "<tr>"
-        "<td style=\'padding:10px;border:1px solid #e2e8f0;font-weight:600;\'>High Threat</td>"
-        "<td style=\'padding:10px;border:1px solid #e2e8f0;color:#dc2626;font-weight:700;\'>" + str(high_threat) + " টি</td>"
-        "<td style=\'padding:10px;border:1px solid #e2e8f0;font-weight:600;\'>শীর্ষ দল</td>"
-        "<td style=\'padding:10px;border:1px solid #e2e8f0;\'>" + top_party + "</td></tr>"
-        "<tr style=\'background:#f1f5f9;\'>"
-        "<td style=\'padding:10px;border:1px solid #e2e8f0;font-weight:600;\'>প্রধান থিম</td>"
-        "<td colspan=\'3\' style=\'padding:10px;border:1px solid #e2e8f0;\'>" + " · ".join(top_themes) + "</td>"
+        "<td style='padding:10px;border:1px solid #e2e8f0;font-weight:600;'>High Threat</td>"
+        "<td style='padding:10px;border:1px solid #e2e8f0;color:#dc2626;font-weight:700;'>" + str(high_threat) + " টি</td>"
+        "<td style='padding:10px;border:1px solid #e2e8f0;font-weight:600;'>শীর্ষ দল</td>"
+        "<td style='padding:10px;border:1px solid #e2e8f0;'>" + top_party + "</td></tr>"
+        "<tr style='background:#f1f5f9;'>"
+        "<td style='padding:10px;border:1px solid #e2e8f0;font-weight:600;'>প্রধান থিম</td>"
+        "<td colspan='3' style='padding:10px;border:1px solid #e2e8f0;'>" + " · ".join(top_themes) + "</td>"
         "</tr></table>"
         "<h3>আউটলেট ভিত্তিক শিরোনাম</h3>" + rows_html +
-        "<hr style=\'border:none;border-top:2px solid #e2e8f0;margin:24px 0;\'>"
-        "<p style=\'color:#9ca3af;font-size:0.82em;text-align:center;\'>"
+        "<hr style='border:none;border-top:2px solid #e2e8f0;margin:24px 0;'>"
+        "<p style='color:#9ca3af;font-size:0.82em;text-align:center;'>"
         "Auto-generated · Political Media Intelligence System · " + scan_time + "</p>"
     )
     return title, html
@@ -640,40 +642,43 @@ def build_wp_summary_post(results, scan_time):
 def build_per_outlet_posts(results):
     posts = []
     for r in [x for x in results if x.get("status") == "success" and x.get("headlines")]:
-        party   = r.get("dominant_party") or "General"
-        theme   = r.get("dominant_theme", "General")
-        threat  = r.get("threat_level", "LOW")
-        pc      = PARTY_COLORS.get(party, "#6b7280")
+        party    = r.get("dominant_party") or "General"
+        theme    = r.get("dominant_theme", "General")
+        threat   = r.get("threat_level", "LOW")
+        pc       = PARTY_COLORS.get(party, "#6b7280")
         tc_color = {"HIGH": "#dc2626", "MEDIUM": "#d97706", "LOW": "#16a34a"}.get(threat, "#16a34a")
-        date_s  = datetime.now().strftime("%d %B %Y")
-        title   = r["name"] + " — " + date_s + " শিরোনাম বিশ্লেষণ"
-        items   = "".join("<li style=\'margin-bottom:6px;\'>" + hl + "</li>" for hl in r.get("headlines", []))
-        content = (
-            "<div style=\'background:#f8fafc;border-left:4px solid " + pc + ";padding:14px;"
-            "border-radius:0 8px 8px 0;margin-bottom:16px;\'>"
-            "<strong>" + r["name"] + "</strong> | " + r.get("category","").replace("_"," ").title() + "<br/>"
-            "<small style=\'color:#6b7280;\'>Key Person: " + r.get("key_person","—") + " | Tier: " + r.get("tier","—") + "</small></div>"
-            "<table style=\'width:100%;border-collapse:collapse;margin-bottom:16px;\'>"
-            "<tr style=\'background:#f1f5f9;\'>"
-            "<td style=\'padding:8px;border:1px solid #e2e8f0;\'><b>Party</b></td>"
-            "<td style=\'padding:8px;border:1px solid #e2e8f0;\'>" + party + "</td>"
-            "<td style=\'padding:8px;border:1px solid #e2e8f0;\'><b>Theme</b></td>"
-            "<td style=\'padding:8px;border:1px solid #e2e8f0;\'>" + theme + "</td></tr>"
+        date_s   = datetime.now().strftime("%d %B %Y")
+        title    = r["name"] + " — " + date_s + " শিরোনাম বিশ্লেষণ"
+        items    = "".join("<li style='margin-bottom:6px;'>" + hl + "</li>" for hl in r.get("headlines", []))
+        content  = (
+            "<div style='background:#f8fafc;border-left:4px solid " + pc + ";padding:14px;"
+            "border-radius:0 8px 8px 0;margin-bottom:16px;'>"
+            "<strong>" + r["name"] + "</strong> | " + r.get("category", "").replace("_", " ").title() + "<br/>"
+            "<small style='color:#6b7280;'>Key Person: " + r.get("key_person", "—") + " | Tier: " + r.get("tier", "—") + "</small></div>"
+            "<table style='width:100%;border-collapse:collapse;margin-bottom:16px;'>"
+            "<tr style='background:#f1f5f9;'>"
+            "<td style='padding:8px;border:1px solid #e2e8f0;'><b>Party</b></td>"
+            "<td style='padding:8px;border:1px solid #e2e8f0;'>" + party + "</td>"
+            "<td style='padding:8px;border:1px solid #e2e8f0;'><b>Theme</b></td>"
+            "<td style='padding:8px;border:1px solid #e2e8f0;'>" + theme + "</td></tr>"
             "<tr>"
-            "<td style=\'padding:8px;border:1px solid #e2e8f0;\'><b>Threat</b></td>"
-            "<td style=\'padding:8px;border:1px solid #e2e8f0;color:" + tc_color + ";font-weight:700;\'>" + threat + "</td>"
-            "<td style=\'padding:8px;border:1px solid #e2e8f0;\'><b>Headlines</b></td>"
-            "<td style=\'padding:8px;border:1px solid #e2e8f0;\'>" + str(r.get("count",0)) + "</td></tr>"
+            "<td style='padding:8px;border:1px solid #e2e8f0;'><b>Threat</b></td>"
+            "<td style='padding:8px;border:1px solid #e2e8f0;color:" + tc_color + ";font-weight:700;'>" + threat + "</td>"
+            "<td style='padding:8px;border:1px solid #e2e8f0;'><b>Headlines</b></td>"
+            "<td style='padding:8px;border:1px solid #e2e8f0;'>" + str(r.get("count", 0)) + "</td></tr>"
             "</table><h3>শিরোনাম সমূহ</h3><ul>" + items + "</ul>"
         )
-        tags = [r.get("category","media"), party.lower().replace(" ","-"), theme.lower(), "bangladesh", "politics"]
+        tags = [r.get("category", "media"), party.lower().replace(" ", "-"), theme.lower(), "bangladesh", "politics"]
         posts.append({"outlet_name": r["name"], "title": title, "content": content,
                       "tags": [t for t in tags if t and t != "—"]})
     return posts
 
 
+# ============================================================
+# MAIN APP
+# ============================================================
+
 def main():
-    # Header
     st.markdown('<h1 class="main-header">🧠 Political Media Intelligence System</h1>', unsafe_allow_html=True)
     st.markdown(
         '<p class="sub-header">'
@@ -705,8 +710,8 @@ def main():
         concurrency = st.slider("⚡ Parallel Scrapers", 2, 12, 6,
                                 help="Higher = faster but more memory. 6 is recommended for HF Spaces.")
 
-        est_low  = len(selected_outlets) * 3  // max(concurrency, 1)
-        est_high = len(selected_outlets) * 7  // max(concurrency, 1)
+        est_low  = len(selected_outlets) * 3 // max(concurrency, 1)
+        est_high = len(selected_outlets) * 7 // max(concurrency, 1)
         st.caption(f"⏱️ Estimated: {est_low}–{est_high}s")
 
         st.markdown("---")
@@ -741,7 +746,6 @@ def main():
     # ── SCAN ─────────────────────────────────────────────────
     if run_scan and selected_outlets:
         progress = st.progress(0, "🚀 Initializing scraper engine...")
-        status_placeholder = st.empty()
         start_ts = time.time()
 
         with st.spinner(f"Scanning {len(selected_outlets)} outlets with {concurrency} parallel workers..."):
@@ -765,7 +769,6 @@ def main():
             f"{success_n}/{len(results)} outlets · **{total_hl}** headlines scraped"
         )
 
-        # Tier breakdown
         tier_counts = Counter(r.get("tier", "Failed") for r in results)
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("⚡ Tier1 (aiohttp)",    tier_counts.get("Tier1 (aiohttp)", 0))
@@ -775,8 +778,8 @@ def main():
         c5.metric("❌ Failed",              tier_counts.get("Failed", 0))
 
     # ── Load state ───────────────────────────────────────────
-    results    = st.session_state.get("results", [])
-    scan_time  = st.session_state.get("scan_time", "—")
+    results   = st.session_state.get("results", [])
+    scan_time = st.session_state.get("scan_time", "—")
 
     if not results:
         st.info("👆 Select categories in the sidebar and click **Run Full Intelligence Scan** to begin.")
@@ -785,7 +788,6 @@ def main():
     successful = [r for r in results if r["status"] == "success"]
     failed     = [r for r in results if r["status"] == "failed"]
 
-    # Apply sidebar filters
     filtered = successful[:]
     if party_filter != "All":
         filtered = [r for r in filtered if r.get("dominant_party") == party_filter]
@@ -794,22 +796,21 @@ def main():
 
     # ── TAB 1: OVERVIEW ──────────────────────────────────────
     with tab1:
-        # KPIs
         high_threat_n = sum(1 for r in successful if r.get("threat_level") == "HIGH")
-        coord_n = sum(1 for n in detect_narratives(successful) if n["coordinated"])
-        total_hl_n = sum(r["count"] for r in successful)
-        avg_sent = round(
+        coord_n       = sum(1 for n in detect_narratives(successful) if n["coordinated"])
+        total_hl_n    = sum(r["count"] for r in successful)
+        avg_sent      = round(
             sum(r.get("avg_polarity", 0) for r in successful) / max(len(successful), 1), 3
         ) if successful else 0
 
         cols = st.columns(6)
         kpi_data = [
-            ("📡 Outlets Scanned",  len(results),     f"{len(successful)} success"),
-            ("📰 Headlines",        total_hl_n,        f"Avg {total_hl_n//max(len(successful),1)}/outlet"),
-            ("🚨 High Threat",      high_threat_n,     "outlets"),
-            ("🔴 Coordinated",      coord_n,           "narratives"),
-            ("💬 Avg Sentiment",    f"{avg_sent:+.3f}", "polarity"),
-            ("⏰ Last Scan",         scan_time[-8:],    scan_time[:10]),
+            ("📡 Outlets Scanned", len(results),          f"{len(successful)} success"),
+            ("📰 Headlines",       total_hl_n,             f"Avg {total_hl_n//max(len(successful),1)}/outlet"),
+            ("🚨 High Threat",     high_threat_n,          "outlets"),
+            ("🔴 Coordinated",     coord_n,                "narratives"),
+            ("💬 Avg Sentiment",   f"{avg_sent:+.3f}",     "polarity"),
+            ("⏰ Last Scan",        scan_time[-8:],         scan_time[:10]),
         ]
         for col, (label, val, sub) in zip(cols, kpi_data):
             col.markdown(_kpi(label, val, sub), unsafe_allow_html=True)
@@ -824,10 +825,10 @@ def main():
                 dist  = r.get("sentiment_dist", {})
                 total = sum(dist.values()) or 1
                 rows.append({
-                    "Outlet":      r["name"],
-                    "Positive %":  round(dist.get("Positive", 0) / total * 100, 1),
-                    "Neutral %":   round(dist.get("Neutral",  0) / total * 100, 1),
-                    "Negative %":  round(dist.get("Negative", 0) / total * 100, 1),
+                    "Outlet":     r["name"],
+                    "Positive %": round(dist.get("Positive", 0) / total * 100, 1),
+                    "Neutral %":  round(dist.get("Neutral",  0) / total * 100, 1),
+                    "Negative %": round(dist.get("Negative", 0) / total * 100, 1),
                 })
             if rows:
                 df = pd.DataFrame(rows)
@@ -852,10 +853,10 @@ def main():
                 for t, c in r.get("narrative_themes", {}).items():
                     theme_agg[t] += c
             if theme_agg:
-                df_t = pd.DataFrame(theme_agg.items(), columns=["Theme", "Mentions"])
-                fig2 = px.pie(df_t, values="Mentions", names="Theme",
-                              color_discrete_sequence=px.colors.qualitative.Bold,
-                              template="plotly_white")
+                df_t  = pd.DataFrame(theme_agg.items(), columns=["Theme", "Mentions"])
+                fig2  = px.pie(df_t, values="Mentions", names="Theme",
+                               color_discrete_sequence=px.colors.qualitative.Bold,
+                               template="plotly_white")
                 fig2.update_traces(textposition="inside", textinfo="percent+label")
                 st.plotly_chart(fig2, use_container_width=True)
 
@@ -875,14 +876,15 @@ def main():
             })
         if tbl:
             df_tbl = pd.DataFrame(tbl)
+            # ✅ FIX: matplotlib-free coloring (no background_gradient)
             st.dataframe(
                 df_tbl.style
                 .applymap(
                     lambda v: "background:#fee2e2;font-weight:bold" if v == "HIGH"
-                    else ("background:#fef3c7" if v == "MEDIUM" else ""),
+                    else ("background:#fef3c7;font-weight:bold" if v == "MEDIUM" else ""),
                     subset=["Threat Level"]
                 )
-                .background_gradient(subset=["Avg Sentiment"], cmap="RdYlGn", vmin=-1, vmax=1),
+                .applymap(_color_sentiment, subset=["Avg Sentiment"]),
                 use_container_width=True, height=400,
             )
 
@@ -943,7 +945,7 @@ def main():
             for p, s in r.get("party_bias", {}).items():
                 overall[p] += s
         if overall:
-            df_p = pd.DataFrame(overall.items(), columns=["Party", "Mentions"]).sort_values("Mentions")
+            df_p  = pd.DataFrame(overall.items(), columns=["Party", "Mentions"]).sort_values("Mentions")
             fig_p = px.bar(df_p, x="Mentions", y="Party", orientation="h",
                            color="Party", color_discrete_map=PARTY_COLORS,
                            title="Total Party Mentions Across All Scanned Media",
@@ -961,7 +963,7 @@ def main():
             col1, col2 = st.columns([3, 1])
             with col1:
                 for n in narratives:
-                    badge = "🔴 COORDINATED" if n["coordinated"] else "🟡 Organic"
+                    badge       = "🔴 COORDINATED" if n["coordinated"] else "🟡 Organic"
                     theme_color = "#7c3aed" if n["theme"] != "General" else "#6b7280"
                     st.markdown(f"""
                     <div class="narrative-box">
@@ -987,7 +989,7 @@ def main():
                 outlets_in = len(set(s for n in narratives for s in n["sources"]))
                 st.metric("📰 Outlets",      outlets_in)
 
-                tc = Counter(n["theme"] for n in narratives)
+                tc     = Counter(n["theme"] for n in narratives)
                 fig_tc = px.pie(
                     pd.DataFrame(tc.items(), columns=["Theme", "Count"]),
                     values="Count", names="Theme", title="By Theme",
@@ -1008,7 +1010,7 @@ def main():
             med_signals  = [s for s in signals if s["level"] == "MEDIUM"]
             st.error(f"🚨 {len(signals)} threat signal(s) detected! ({len(high_signals)} HIGH, {len(med_signals)} MEDIUM)")
             for ts in signals:
-                css = "alert-danger" if ts["level"] == "HIGH" else "alert-warning"
+                css         = "alert-danger" if ts["level"] == "HIGH" else "alert-warning"
                 outlets_str = f"<br/><small>Outlets: {', '.join(ts['outlets'][:8])}</small>" if ts.get("outlets") else ""
                 st.markdown(f"""
                 <div class="alert-box {css}">
@@ -1027,7 +1029,7 @@ def main():
             key=lambda x: x["Score"], reverse=True
         )
         if td:
-            df_td = pd.DataFrame(td)
+            df_td  = pd.DataFrame(td)
             fig_td = px.bar(
                 df_td, x="Outlet", y="Score", color="Level",
                 color_discrete_map={"HIGH": "#dc2626", "MEDIUM": "#d97706", "LOW": "#16a34a"},
@@ -1043,7 +1045,7 @@ def main():
                 for kw in a.get("threat_hits", []):
                     kw_hits[kw] += 1
         if kw_hits:
-            df_kw = pd.DataFrame(kw_hits.most_common(18), columns=["Keyword", "Count"])
+            df_kw  = pd.DataFrame(kw_hits.most_common(18), columns=["Keyword", "Count"])
             fig_kw = px.bar(df_kw, x="Count", y="Keyword", orientation="h",
                             color="Count", color_continuous_scale="Reds",
                             title="Most Frequent Threat Keywords", template="plotly_white")
@@ -1058,7 +1060,7 @@ def main():
         if preds:
             for i, p in enumerate(preds, 1):
                 intensity = p["intensity"]
-                color = "#dc2626" if intensity >= 70 else ("#d97706" if intensity >= 40 else "#16a34a")
+                color     = "#dc2626" if intensity >= 70 else ("#d97706" if intensity >= 40 else "#16a34a")
                 st.markdown(f"""
                 <div class="predict-card" style="border-left:6px solid {color};">
                     <div style="display:flex; justify-content:space-between; align-items:center;">
@@ -1126,10 +1128,8 @@ def main():
                     ),
                     use_container_width=True, height=400,
                 )
-
-                # Sentiment breakdown of search results
                 sent_ct = Counter(m["Sentiment"] for m in matches)
-                fig_s = px.pie(
+                fig_s   = px.pie(
                     pd.DataFrame(sent_ct.items(), columns=["Sentiment", "Count"]),
                     values="Count", names="Sentiment",
                     color="Sentiment",
@@ -1139,31 +1139,45 @@ def main():
                 )
                 st.plotly_chart(fig_s, use_container_width=True)
 
-
     # ── TAB 7: WORDPRESS ──────────────────────────────────────
     with tab7:
         st.subheader("🌐 WordPress Auto-Publish")
         st.caption("স্ক্যান ফলাফল সরাসরি WordPress সাইটে পোস্ট করুন")
 
-        with st.expander("🔑 WordPress Credentials", expanded=True):
-            st.info(
-                "**Application Password ব্যবহার করুন**\n\n"
-                "WordPress Admin → Users → Profile → Application Passwords → নতুন পাসওয়ার্ড তৈরি করুন\n\n"
-                "⚠️ Regular login password কাজ করবে না।"
-            )
+        WP_URL_ENV  = os.getenv("WP_URL",  "https://centraldashboard.pibbd.org")
+        WP_USER_ENV = os.getenv("WP_USER", "")
+        WP_PASS_ENV = os.getenv("WP_PASSWORD", "")
+
+        with st.expander("🔑 WordPress Credentials", expanded=not bool(WP_PASS_ENV)):
+            if WP_PASS_ENV:
+                st.success(
+                    "✅ **Credentials loaded from Hugging Face Secrets**\n\n"
+                    f"URL: `{WP_URL_ENV}` | User: `{WP_USER_ENV}`\n\n"
+                    "নিচের fields ফাঁকা রাখলে Secrets থেকে automatically নেবে।"
+                )
+            else:
+                st.warning(
+                    "⚠️ HF Secrets সেট করা নেই। নিচে manually দিন অথবা "
+                    "Space Settings → Variables and Secrets এ WP_URL / WP_USER / WP_PASSWORD যোগ করুন।"
+                )
+
             wc1, wc2 = st.columns(2)
             with wc1:
-                wp_url  = st.text_input("🔗 WordPress URL", placeholder="https://your-site.com",
-                                        value=st.session_state.get("wp_url", ""), key="wp_url_input")
-                wp_user = st.text_input("👤 Username", placeholder="admin",
-                                        value=st.session_state.get("wp_user", ""), key="wp_user_input")
+                wp_url  = st.text_input("🔗 WordPress URL",  placeholder="https://your-site.com",
+                                        value="", key="wp_url_input")
+                wp_user = st.text_input("👤 Username",        placeholder=WP_USER_ENV or "admin",
+                                        value="", key="wp_user_input")
             with wc2:
                 wp_pass   = st.text_input("🔐 Application Password",
-                                          placeholder="xxxx xxxx xxxx xxxx xxxx xxxx",
+                                          placeholder="ফাঁকা রাখলে WP_PASSWORD Secret ব্যবহার হবে",
                                           type="password", key="wp_pass_input")
                 wp_status = st.selectbox("📤 Post Status", ["draft", "publish", "pending"],
-                                         index=0, key="wp_status_input",
-                                         help="draft = ড্রাফট হিসেবে সেভ হবে, পাবলিশ হবে না")
+                                         index=0, key="wp_status_input")
+
+            wp_url  = wp_url.strip()  or WP_URL_ENV
+            wp_user = wp_user.strip() or WP_USER_ENV
+            wp_pass = wp_pass.strip() or WP_PASS_ENV
+
             if st.button("🔌 Test Connection"):
                 if wp_url and wp_user and wp_pass:
                     with st.spinner("Connecting..."):
@@ -1175,27 +1189,22 @@ def main():
                     else:
                         st.error("❌ Failed: " + conn["error"])
                 else:
-                    st.warning("URL, Username ও Password সব দিন।")
+                    st.warning("URL, Username ও Password দিন।")
 
         if not successful:
             st.warning("⚠️ WordPress-এ পোস্ট করতে আগে scan চালান।")
         else:
             st.markdown("---")
-
-            # Optional: fetch WP categories
-            wp_url_val  = st.session_state.get("wp_url", "")
-            wp_user_val = st.session_state.get("wp_user", "")
-            wp_pass_val = st.session_state.get("wp_pass_input", "")
-            cat_ids_wp  = []
+            cat_ids_wp = []
 
             with st.expander("🗂️ WordPress Category (optional)"):
-                if wp_url_val and wp_user_val and wp_pass_val:
+                if wp_url and wp_user and wp_pass:
                     if st.button("📂 Fetch WP Categories"):
-                        wpcats = wp_get_categories(wp_url_val, wp_user_val, wp_pass_val)
+                        wpcats = wp_get_categories(wp_url, wp_user, wp_pass)
                         st.session_state["wp_cats"] = wpcats
                     wpcats_list = st.session_state.get("wp_cats", [])
                     if wpcats_list:
-                        cat_map = {c["name"]: c["id"] for c in wpcats_list}
+                        cat_map   = {c["name"]: c["id"] for c in wpcats_list}
                         sel_wpcat = st.selectbox("Category", ["— None —"] + list(cat_map.keys()))
                         if sel_wpcat != "— None —":
                             cat_ids_wp = [cat_map[sel_wpcat]]
@@ -1208,9 +1217,9 @@ def main():
                 horizontal=True
             )
 
-            wp_url_cur  = st.session_state.get("wp_url_input", "") or st.session_state.get("wp_url", "")
-            wp_user_cur = st.session_state.get("wp_user_input", "") or st.session_state.get("wp_user", "")
-            wp_pass_cur = st.session_state.get("wp_pass_input", "")
+            wp_url_cur  = wp_url
+            wp_user_cur = wp_user
+            wp_pass_cur = wp_pass
             wp_stat_cur = st.session_state.get("wp_status_input", "draft")
 
             if "Summary" in pub_mode:
@@ -1239,8 +1248,7 @@ def main():
             elif "Per-Outlet" in pub_mode:
                 outlet_posts = build_per_outlet_posts(results)
                 st.info("**" + str(len(outlet_posts)) + " posts** তৈরি হবে — প্রতি outlet আলাদা পোস্ট")
-                pa_col, pb_col = st.columns(2)
-                with pa_col:
+                with st.columns(2)[0]:
                     pub_delay = st.slider("Delay between posts (seconds)", 0, 5, 1, key="pub_delay")
                 if st.button("🚀 Publish " + str(len(outlet_posts)) + " Posts", type="primary", use_container_width=True):
                     if not (wp_url_cur and wp_user_cur and wp_pass_cur):
@@ -1257,17 +1265,11 @@ def main():
                             )
                             if pub_r["ok"]:
                                 pub_ok_n += 1
-                                link_html = ("<a href=\"" + pub_r.get("link","") + "\" target=\"_blank\">Post #" + str(pub_r.get("id","")) + "</a>")
-                                st.markdown(
-                                    "<div class=\"wp-card\">✅ <b>" + opost["outlet_name"] + "</b> — " + link_html + "</div>",
-                                    unsafe_allow_html=True
-                                )
+                                link_html = "<a href='" + pub_r.get("link","") + "' target='_blank'>Post #" + str(pub_r.get("id","")) + "</a>"
+                                st.markdown("<div class='wp-card'>✅ <b>" + opost["outlet_name"] + "</b> — " + link_html + "</div>", unsafe_allow_html=True)
                             else:
                                 pub_fail_n += 1
-                                st.markdown(
-                                    "<div class=\"wp-error\">❌ <b>" + opost["outlet_name"] + "</b> — " + pub_r["error"][:80] + "</div>",
-                                    unsafe_allow_html=True
-                                )
+                                st.markdown("<div class='wp-error'>❌ <b>" + opost["outlet_name"] + "</b> — " + pub_r["error"][:80] + "</div>", unsafe_allow_html=True)
                             wp_prog.progress((idx + 1) / len(outlet_posts))
                             if pub_delay > 0:
                                 time.sleep(pub_delay)
@@ -1279,8 +1281,7 @@ def main():
                 sel_outlet_names  = st.multiselect("Outlets বেছে নিন", outlet_names_list, default=outlet_names_list[:3])
                 sel_o_posts = build_per_outlet_posts([r for r in successful if r["name"] in sel_outlet_names])
                 if sel_o_posts:
-                    if st.button("🚀 Publish " + str(len(sel_o_posts)) + " Selected Posts",
-                                 type="primary", use_container_width=True):
+                    if st.button("🚀 Publish " + str(len(sel_o_posts)) + " Selected Posts", type="primary", use_container_width=True):
                         if not (wp_url_cur and wp_user_cur and wp_pass_cur):
                             st.error("❌ Credentials দিন।")
                         else:
@@ -1294,28 +1295,25 @@ def main():
                                 )
                                 if pub_r["ok"]:
                                     pub_ok_s += 1
-                                    link_h = ("<a href=\"" + pub_r.get("link","") + "\" target=\"_blank\">Post #" + str(pub_r.get("id","")) + "</a>")
-                                    st.markdown("<div class=\"wp-card\">✅ <b>" + sop["outlet_name"] + "</b> — " + link_h + "</div>",
-                                                unsafe_allow_html=True)
+                                    link_h = "<a href='" + pub_r.get("link","") + "' target='_blank'>Post #" + str(pub_r.get("id","")) + "</a>"
+                                    st.markdown("<div class='wp-card'>✅ <b>" + sop["outlet_name"] + "</b> — " + link_h + "</div>", unsafe_allow_html=True)
                                 else:
-                                    st.markdown("<div class=\"wp-error\">❌ <b>" + sop["outlet_name"] + "</b> — " + pub_r["error"][:80] + "</div>",
-                                                unsafe_allow_html=True)
+                                    st.markdown("<div class='wp-error'>❌ <b>" + sop["outlet_name"] + "</b> — " + pub_r["error"][:80] + "</div>", unsafe_allow_html=True)
                             st.success("✅ " + str(pub_ok_s) + "/" + str(len(sel_o_posts)) + " published!")
-
 
     # ── TAB 8: RAW DATA ───────────────────────────────────────
     with tab8:
         st.subheader("🔬 Raw Scrape Data & Export")
 
         col_r1, col_r2, col_r3 = st.columns(3)
-        col_r1.metric("Total Outlets",   len(results))
-        col_r2.metric("Successful",       len(successful))
-        col_r3.metric("Total Headlines",  sum(r["count"] for r in successful))
+        col_r1.metric("Total Outlets",  len(results))
+        col_r2.metric("Successful",      len(successful))
+        col_r3.metric("Total Headlines", sum(r["count"] for r in successful))
 
         for r in results:
             status_icon = "✅" if r["status"] == "success" else ("⏭️" if r["status"] == "skipped" else "❌")
-            tier = r.get("tier", "Failed")
-            tc, ti = TIER_CSS.get(tier, ("tierfail", "❓"))
+            tier        = r.get("tier", "Failed")
+            tc, ti      = TIER_CSS.get(tier, ("tierfail", "❓"))
             with st.expander(
                 f"{status_icon} {r['name']} — {r['count']} headlines — "
                 f"{r.get('elapsed_sec','?')}s — {tier}"
